@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import handoffPlugin from "../src/index.js"
@@ -54,11 +54,11 @@ afterEach(() => {
   delete runtimeOverrides.subagentLimit
 })
 
-async function startPlugin(events: unknown[] = []) {
+async function startPlugin(events: unknown[] = [], sessionDirs: Record<string, string> = {}) {
   const state = {
     messages: [] as unknown[],
     prompts: [] as PromptCall[],
-    created: [] as { title?: string }[],
+    created: [] as { title?: string; location?: { directory?: string } }[],
   }
   const hooks: Record<string, (input: any) => Promise<unknown>> = {}
 
@@ -70,6 +70,11 @@ async function startPlugin(events: unknown[] = []) {
     session: {
       hook: async (name: string, handler: any) => {
         hooks[name] = handler
+      },
+      get: async (input: { sessionID: string }) => {
+        const dir = sessionDirs[input.sessionID]
+        if (!dir) throw new Error("SessionNotFoundError")
+        return { id: input.sessionID, location: { directory: dir } }
       },
       context: async () => state.messages,
       prompt: async (input: PromptCall) => {
@@ -162,6 +167,55 @@ describe("forward-handoff rollover (end-to-end)", () => {
     state.messages = [assistantMessage(9_000, 0, "just a normal reply")]
     await hooks["experimental.idle"]!({ sessionID: "ses_primary" })
     expect(state.created).toHaveLength(0)
+
+    await cleanup?.()
+  })
+
+  it("resolves config, artifacts and child location per session, not per server", async () => {
+    // Server boots in `sandbox` (limit 5000); the session actually works in
+    // `repo2` (limit 3000). The gate, artifact dir and child session must all
+    // follow the session, never the server's boot location.
+    const repo2 = join(sandbox, "repo2")
+    mkdirSync(join(repo2, ".opencode"), { recursive: true })
+    writeFileSync(
+      join(repo2, ".opencode", "handoff.json"),
+      JSON.stringify({
+        primaryLimit: 3_000,
+        autoRollover: true,
+        saveArtifactsDir: ".opencode/handoffs",
+      })
+    )
+
+    // ses_event learns its directory from the session.created event;
+    // ses_fetch only via the ctx.session.get fallback.
+    const { state, hooks, cleanup } = await startPlugin(
+      [
+        {
+          type: "session.created",
+          data: { sessionID: "ses_event", location: { directory: repo2 } },
+        },
+      ],
+      { ses_fetch: repo2 }
+    )
+
+    // 3500 tokens: under the server's 5000, over repo2's 3000 -> must block.
+    state.messages = [assistantMessage(3_500, 0)]
+    await expect(
+      hooks["tool.execute.before"]!({ sessionID: "ses_event", tool: "shell" })
+    ).rejects.toThrow(/3500\/3000/)
+    await expect(
+      hooks["tool.execute.before"]!({ sessionID: "ses_fetch", tool: "shell" })
+    ).rejects.toThrow(/3500\/3000/)
+
+    // Artifact lands in the session's repo; the child inherits its location.
+    state.messages = [assistantMessage(3_500, 0, ARTIFACT)]
+    await hooks["experimental.idle"]!({ sessionID: "ses_event" })
+
+    const files = readdirSync(join(repo2, ".opencode", "handoffs"))
+    expect(files).toHaveLength(1)
+    expect(state.created).toHaveLength(1)
+    expect(state.created[0].location?.directory).toBe(repo2)
+    expect(existsSync(join(sandbox, ".opencode", "handoffs"))).toBe(false)
 
     await cleanup?.()
   })

@@ -27,10 +27,31 @@ export default Plugin.define({
     const isSubagent = new Map<string, boolean>()
     const handoffPending = new Set<string>()
     const rolloverCompleted = new Set<string>()
+    const sessionWorktree = new Map<string, string>()
     const abortController = new AbortController()
 
-    const getWorktree = () =>
+    const getServerWorktree = () =>
       (ctx.location as { directory?: string }).directory ?? process.cwd()
+
+    // A server hosts sessions from many working directories: ctx.location is the
+    // server's boot location, NOT the session's. Resolve the session's own
+    // directory (cached from the session.created event, else ctx.session.get)
+    // so config file, artifact dir and child-session location all follow the run.
+    async function resolveWorktree(sessionID: string): Promise<string> {
+      const cached = sessionWorktree.get(sessionID)
+      if (cached) return cached
+      try {
+        const info = await ctx.session.get({ sessionID })
+        const dir = (info as { location?: { directory?: string } }).location?.directory
+        if (dir) {
+          sessionWorktree.set(sessionID, dir)
+          return dir
+        }
+      } catch {
+        // fall through to the server boot location
+      }
+      return getServerWorktree()
+    }
 
     const pluginOptions = ctx.options as unknown as Partial<HandoffConfig> | undefined
 
@@ -41,7 +62,7 @@ export default Plugin.define({
         description:
           "View, update, or get help on primary/subagent token limits (defaults: 24000 / 16000)",
         async execute(input) {
-          const worktree = getWorktree()
+          const worktree = await resolveWorktree(input.sessionID)
           const rawText = (input.prompt?.text ?? "").trim()
 
           // Strip leading "/handoff-limit" if present in prompt text
@@ -122,6 +143,8 @@ export default Plugin.define({
           if (event.type === "session.created") {
             const sessionID = event.data.sessionID
             isSubagent.set(sessionID, Boolean(event.data.parentID))
+            const dir = (event.data as { location?: { directory?: string } }).location?.directory
+            if (dir) sessionWorktree.set(sessionID, dir)
           }
 
           if (event.type === "session.deleted") {
@@ -129,6 +152,7 @@ export default Plugin.define({
             isSubagent.delete(id)
             handoffPending.delete(id)
             rolloverCompleted.delete(id)
+            sessionWorktree.delete(id)
           }
         }
       } catch {
@@ -146,7 +170,7 @@ export default Plugin.define({
         return
       }
 
-      const worktree = getWorktree()
+      const worktree = await resolveWorktree(sessionID)
       const cfg = loadConfig(worktree, pluginOptions)
       const messages = await ctx.session.context({ sessionID })
 
@@ -175,6 +199,7 @@ export default Plugin.define({
         if (cfg.autoRollover) {
           const newSession = await ctx.session.create({
             title: `Resumed Handoff (${new Date().toLocaleTimeString()})`,
+            location: { directory: worktree },
           })
 
           if (newSession?.id) {
@@ -189,7 +214,8 @@ export default Plugin.define({
 
     // 4. Block tools when active session reaches its configured token limit
     await ctx.tool.hook("execute.before", async (input) => {
-      const cfg = loadConfig(getWorktree(), pluginOptions)
+      const worktree = await resolveWorktree(input.sessionID)
+      const cfg = loadConfig(worktree, pluginOptions)
       const currentTokens = occupancyFromMessages(
         await ctx.session.context({ sessionID: input.sessionID })
       )

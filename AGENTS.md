@@ -113,7 +113,10 @@ tests/          vitest; rollover tests drive real setup() with mock ctx
 - Message schema is V2 (`type: "assistant"`, `content` parts array). V1-era
   `role`/`parts` field names silently match nothing.
 - `/handoff-limit` values ≤ 1000 are ignored (guard against typos like `2k`).
-- Artifact dir is relative to `ctx.location.directory` (the active worktree), falling
-  back to `process.cwd()`.
+- Config, artifact dir and child-session location are resolved **per session** via
+  `resolveWorktree(sessionID)` (session.created event → `ctx.session.get().location.directory`
+  → server boot dir → `process.cwd()`). `ctx.location.directory` is the *server's*
+  boot location, NOT the session's — a shared `opencode serve` hosts many repos, so
+  never use it directly for per-run decisions.
 - Install sources: local path, `github:user/repo`, or `git+https://...` in the `plugins`
   array — all resolve to the same package; see README for pinning semantics.
