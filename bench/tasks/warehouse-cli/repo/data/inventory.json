@@ -1,0 +1,7 @@
+[
+  { "sku": "A-100", "onHand": 10, "reserved": 3 },
+  { "sku": "B-200", "onHand": 5, "reserved": 0 },
+  { "sku": "C-300", "onHand": 2, "reserved": 1 },
+  { "sku": "D-400", "onHand": 100, "reserved": 0 },
+  { "sku": "E-500", "onHand": 4, "reserved": 4 }
+]

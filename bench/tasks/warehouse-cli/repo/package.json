@@ -1,0 +1,10 @@
+{
+  "name": "warehouse-cli",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "allocate": "bun src/cli.ts allocate data/inventory.json data/orders.json",
+    "report": "bun src/cli.ts report data/inventory.json data/orders.json"
+  }
+}
