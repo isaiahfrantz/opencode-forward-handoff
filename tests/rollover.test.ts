@@ -109,7 +109,7 @@ describe("forward-handoff rollover (end-to-end)", () => {
     await expect(toolHook({ sessionID: "ses_primary", tool: "shell" })).resolves.toBeUndefined()
     expect(state.prompts).toHaveLength(0)
 
-    // Over limit: only the LATEST assistant message counts (3000 + 4000 = 7000 > 5000)
+    // Over limit: occupancy = max over completed assistant messages (3000 + 4000 = 7000 > 5000)
     state.messages = [assistantMessage(1_000, 200), assistantMessage(3_000, 4_000)]
     await expect(toolHook({ sessionID: "ses_primary", tool: "shell" })).rejects.toThrow(
       /Context cap \(7000\/5000/
@@ -140,6 +140,25 @@ describe("forward-handoff rollover (end-to-end)", () => {
     // Idempotent: a second idle does not roll over again
     await idleHook({ sessionID: "ses_primary" })
     expect(state.created).toHaveLength(1)
+
+    await cleanup?.()
+  })
+
+  it("counts occupancy even when the latest assistant message is still streaming (no tokens field)", async () => {
+    const { state, hooks, cleanup } = await startPlugin()
+    const toolHook = hooks["tool.execute.before"]!
+
+    // Real runtime shape from ctx.session.context(): the assistant message being
+    // generated has no `tokens` yet. The gate must fall back to the last
+    // COMPLETED assistant message instead of reading 0.
+    state.messages = [
+      assistantMessage(3_000, 4_000),
+      { type: "assistant", content: [] }, // in-flight message, tokens === undefined
+    ]
+    await expect(toolHook({ sessionID: "ses_primary", tool: "shell" })).rejects.toThrow(
+      /Context cap \(7000\/5000/
+    )
+    expect(state.prompts).toHaveLength(1)
 
     await cleanup?.()
   })

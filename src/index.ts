@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin"
-import { mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { type HandoffConfig, loadConfig, runtimeOverrides } from "./config.js"
 import { buildGeneratorPrompt, buildResumePrompt } from "./prompts.js"
@@ -12,13 +12,18 @@ type AssistantMessageLike = {
 }
 
 function occupancyFromMessages(messages: readonly unknown[]): number {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i] as AssistantMessageLike | undefined
-    if (m?.type === "assistant") {
-      return (m.tokens?.input ?? 0) + (m.tokens?.cache?.read ?? 0)
-    }
+  // The assistant message currently being generated has no `tokens` yet, and
+  // mid-session compaction can shrink history, so take the MAX over all
+  // completed assistant messages instead of only the last one. This slightly
+  // overestimates after a compaction, which is the safe direction for a gate.
+  let max = 0
+  for (const item of messages) {
+    const m = item as AssistantMessageLike | undefined
+    if (m?.type !== "assistant") continue
+    const occupancy = (m.tokens?.input ?? 0) + (m.tokens?.cache?.read ?? 0)
+    if (occupancy > max) max = occupancy
   }
-  return 0
+  return max
 }
 
 export default Plugin.define({
@@ -216,12 +221,23 @@ export default Plugin.define({
     await ctx.tool.hook("execute.before", async (input) => {
       const worktree = await resolveWorktree(input.sessionID)
       const cfg = loadConfig(worktree, pluginOptions)
-      const currentTokens = occupancyFromMessages(
-        await ctx.session.context({ sessionID: input.sessionID })
-      )
+      if (process.env.OPENCODE_HANDOFF_DEBUG) {
+        console.error(
+          `[handoff-debug] session=${input.sessionID} worktree=${worktree} ` +
+            `limit=${cfg.primaryLimit} scratch=${existsSync(join(worktree, ".opencode", "handoff.json"))} ` +
+            `cached_dir=${sessionWorktree.get(input.sessionID) ?? "<none>"}`
+        )
+      }
+      const ctxMsgs = await ctx.session.context({ sessionID: input.sessionID })
+      const currentTokens = occupancyFromMessages(ctxMsgs)
       const subagent = isSubagent.get(input.sessionID) ?? false
       const limit = subagent ? cfg.subagentLimit : cfg.primaryLimit
 
+      if (process.env.OPENCODE_HANDOFF_DEBUG) {
+        console.error(
+          `[handoff-debug]   occupancy=${currentTokens} limit=${limit} gate=${currentTokens >= limit ? "FIRE" : "pass"} msgcount=${ctxMsgs.length}`
+        )
+      }
       if (currentTokens < limit) return
 
       if (!handoffPending.has(input.sessionID)) {

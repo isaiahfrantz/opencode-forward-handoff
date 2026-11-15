@@ -29,9 +29,12 @@ enforcement is the tool-execution block described below.
 
 Occupancy metric (single source of truth: `occupancyFromMessages()` in `src/index.ts`):
 
-> The `tokens.input + tokens.cache.read` of the **last `type === "assistant"` message**
-> returned by `ctx.session.context()`. That sum is what the model is actually billed /
-> sees on the next request, so it tracks real prompt-side occupancy, not a running total.
+> The **maximum** of `tokens.input + tokens.cache.read` over **all `type === "assistant"` messages**
+> returned by `ctx.session.context()`. The assistant message currently being generated has
+> **no `tokens` field yet** (it is `null`/absent until the turn completes), so scanning only
+> the last message reads 0 and the gate never fires. The last *completed* assistant message
+> is a lower bound on next-request occupancy; max guards against mid-session compaction
+> (slight overestimate, the safe direction for a gate).
 
 Never reintroduce running-total accounting (the deleted `sessionTokens` Map +
 `session.usage.updated` handler) — it double-counted cached tokens and inflated
