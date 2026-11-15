@@ -14,9 +14,9 @@
     "@opencode/plugin": "latest"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.4",
     "@types/node": "latest",
     "typescript": "^5.7.0",
     "vitest": "latest"
   }
 }
-
