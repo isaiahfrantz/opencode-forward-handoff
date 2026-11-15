@@ -6,14 +6,15 @@ handoff artifact, and automatically rolls over to a fresh session seeded with a 
 
 ## How it works
 
-1. **Occupancy tracking** — after every tool call, the plugin measures the session's true context
+1. **Occupancy tracking** — before every tool call, the plugin measures the session's true context
    occupancy (prompt-side tokens of the latest assistant message: `input + cache.read`).
 2. **Limit reached** — further tool calls are blocked and the agent is instructed to stop and
    output a `# SESSION HANDOFF ARTIFACT`: objective, verified progress, failed approaches,
    file/symbol map, and the immediate next step.
 3. **Auto-rollover** — when the session goes idle with a completed artifact, it is saved to
-   `.opencode/handoffs/` and a new session is created and prompted to continue directly from
-   the handoff payload.
+   `.opencode/handoffs/handoff-<timestamp>.md` and a new session titled
+   `Resumed Handoff (<time>)` is created and prompted to continue directly from the handoff
+   payload.
 4. **Subagents** — subagent sessions have their own (lower) cap and are asked for a concise
    summary back to the parent instead of a full handoff; they never roll over.
 
@@ -63,6 +64,29 @@ Precedence (lowest to highest): built-in defaults → plugin options → environ
 /handoff-limit reset              Clear runtime overrides
 /handoff-limit help               Show usage
 ```
+
+Runtime overrides are held in memory only (per OpenCode process) and are validated to values
+above 1,000 tokens. Raising the limit above current usage mid-session un-blocks the session
+immediately, so you can extend a session instead of rolling over.
+
+## TUI companion
+
+`src/tui.tsx` is a companion TUI plugin (exported as `opencode-forward-handoff/tui`). It watches
+for sessions titled `Resumed Handoff …` and automatically focuses the new tab and shows a toast,
+so the handoff rollover is visible as it happens:
+
+```json
+{
+  "plugin": ["opencode-forward-handoff", "opencode-forward-handoff/tui"]
+}
+```
+
+## Handoff artifacts
+
+- Saved per repository to `<saveArtifactsDir>/handoff-<ISO-timestamp>.md` (default
+  `.opencode/handoffs/`, git-ignored by this repo's `.gitignore`).
+- An artifact is recognized by the `# SESSION HANDOFF ARTIFACT` heading in the agent's final
+  message; rollover only fires for primary sessions, and only once per session.
 
 ## Development
 
