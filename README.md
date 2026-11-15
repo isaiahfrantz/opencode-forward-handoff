@@ -20,15 +20,34 @@ handoff artifact, and automatically rolls over to a fresh session seeded with a 
 
 ## Install
 
-Add it to your OpenCode config (`~/.config/opencode/opencode.json`):
+Install from this repository (OpenCode CLI):
 
-```json
+```sh
+opencode plugin add github:isaiahfrantz/opencode-forward-handoff
+```
+
+…or add it directly to your OpenCode config (`opencode.json(c)`, global or per-project):
+
+```jsonc
 {
-  "plugin": ["opencode-forward-handoff"]
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["github:isaiahfrantz/opencode-forward-handoff"]
 }
 ```
 
-Or drop the source into `~/.config/opencode/plugin/`.
+Git specs support branches, tags, and full commit hashes as pins — e.g.
+`github:isaiahfrantz/opencode-forward-handoff#v0.1.0` — and the explicit SSH form
+`git+ssh://git@github.com/isaiahfrantz/opencode-forward-handoff.git`. Pinned entries are not
+auto-updated; unpinned ones can be refreshed with `opencode plugin update`.
+
+For local development, point the entry at a checkout instead:
+
+```jsonc
+{ "plugins": ["/path/to/opencode-forward-handoff"] }
+```
+
+A copy of the source can also live under `~/.config/opencode/plugins/`, where it is discovered
+automatically.
 
 ## Configuration
 
@@ -71,15 +90,10 @@ immediately, so you can extend a session instead of rolling over.
 
 ## TUI companion
 
-`src/tui.tsx` is a companion TUI plugin (exported as `opencode-forward-handoff/tui`). It watches
+`src/tui.tsx` is a companion TUI part of the same package (exported as `opencode-forward-handoff/tui`). It watches
 for sessions titled `Resumed Handoff …` and automatically focuses the new tab and shows a toast,
-so the handoff rollover is visible as it happens:
-
-```json
-{
-  "plugin": ["opencode-forward-handoff", "opencode-forward-handoff/tui"]
-}
-```
+so the handoff rollover is visible as it happens. A single plugin entry loads every part — the
+TUI picks up the TUI part of whatever the server loads, so no extra configuration is needed.
 
 ## Handoff artifacts
 
