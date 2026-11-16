@@ -55,8 +55,11 @@ const fmt = (n: number, d = 0) =>
   n.toLocaleString("en-US", { maximumFractionDigits: d, minimumFractionDigits: d })
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
 
-const ARMS = ["with", "without"] as const
-const ARM_COLOR: Record<string, string> = { with: "#2f81f7", without: "#8b949e" }
+// display order; sections show only the arms present in their rows
+// ("with" = original pre-grace plugin, "updated" = grace-window plugin; both
+// are plugin-enabled arms compared against "without")
+const ARMS = ["with", "without", "updated"] as const
+const ARM_COLOR: Record<string, string> = { with: "#2f81f7", without: "#8b949e", updated: "#3fb950" }
 
 type Stats = {
   reps: number
@@ -195,11 +198,17 @@ files.forEach((file, idx) => {
           `${fmt(s.hops, 1)} | ${fmt(s.nudges, 1)} | ${fmt(s.rejects, 1)} |`
       )
     }
-    const w = st.with, wo = st.without
-    if (w && wo) {
+    const pairs: Array<[string, string]> = [
+      ["with", "without"],
+      ["updated", "without"],
+      ["updated", "with"],
+    ]
+    for (const [a, b] of pairs) {
+      const x = st[a], y = st[b]
+      if (!x || !y) continue
       emit(
-        `|  | **Δ (with vs without)** | | ${delta(w.success, wo.success)} | ` +
-          `${delta(w.wall, wo.wall)} | ${delta(w.tokens, wo.tokens)} | | | ${delta(w.rejects, wo.rejects)} |`
+        `|  | **Δ (${a} vs ${b})** | | ${delta(x.success, y.success)} | ` +
+          `${delta(x.wall, y.wall)} | ${delta(x.tokens, y.tokens)} | | | ${delta(x.rejects, y.rejects)} |`
       )
     }
   }
