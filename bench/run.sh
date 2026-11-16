@@ -48,14 +48,15 @@ PORT_WITH=17801
 PORT_WITHOUT=17802
 PORT_UPDATED=17803
 PORT_SUBFIX=17804
+PORT_ANCHORED=17805
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --arm)
       case "$2" in
         both) ARMS="with without" ;;
-        with|without|updated|subfix) ARMS="$2" ;;
-        *) echo "unknown arm: $2 (use with|without|updated|subfix|both)" >&2; exit 2 ;;
+        with|without|updated|subfix|anchored) ARMS="$2" ;;
+        *) echo "unknown arm: $2 (use with|without|updated|subfix|anchored|both)" >&2; exit 2 ;;
       esac
       shift 2 ;;
     --tasks) TASKS="$2"; shift 2 ;;
@@ -84,6 +85,7 @@ start_server() { # arm -> sets SERVER_PID[arm], SERVER_PORT[arm], etc.
     with) port=$PORT_WITH ;;
     updated) port=$PORT_UPDATED ;;
     subfix) port=$PORT_SUBFIX ;;
+    anchored) port=$PORT_ANCHORED ;;
     *) port=$PORT_WITHOUT ;;
   esac
   local data="$RUNS_DIR/$arm/data"
