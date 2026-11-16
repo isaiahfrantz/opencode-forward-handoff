@@ -62,6 +62,9 @@ beforeEach(() => {
     JSON.stringify({
       primaryLimit: 5_000,
       subagentLimit: 2_000,
+      // pinned (not relying on the shipped default) so the grace band is
+      // 5000–9000 as the assertions below assume
+      graceTokens: 4_000,
       autoRollover: true,
       saveArtifactsDir: ".opencode/handoffs",
     })

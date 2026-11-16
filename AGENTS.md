@@ -44,8 +44,8 @@ occupancy quadratically.
 
 Precedence in `loadConfig()` (`src/config.ts`), lowest → highest:
 
-1. `PLUGIN_DEFAULTS` — `primaryLimit: 24000`, `subagentLimit: 16000`, `autoRollover: true`,
-   `saveArtifactsDir: ".opencode/handoffs"`, `graceTokens: 4000`, `deferAtSafeBoundary: true`,
+1. `PLUGIN_DEFAULTS` — `primaryLimit: 28000`, `subagentLimit: 16000`, `autoRollover: true`,
+   `saveArtifactsDir: ".opencode/handoffs"`, `graceTokens: 2000`, `deferAtSafeBoundary: true`,
    `maxDeferrals: 6`, `subagentGraceTokens: 2000`, `subagentPriming: true`
 2. Plugin options passed via `opencode.json` (`{ "package": "...", "options": {...} }`)
 3. Env vars `OPENCODE_PRIMARY_LIMIT` / `OPENCODE_SUBAGENT_LIMIT` / `OPENCODE_GRACE_TOKENS`

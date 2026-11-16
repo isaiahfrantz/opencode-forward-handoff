@@ -3,6 +3,15 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 export interface HandoffConfig {
+  /**
+   * Soft handoff limit for primary sessions. The effective hard gate is
+   * `primaryLimit + graceTokens` — keep that sum below the context capacity
+   * the provider *actually enforces*, which can be far lower than what the
+   * model card declares (several OpenAI-compatible backends advertise 128k+
+   * but hard-reject prompts around 32k). The shipped default pairs 28k with a
+   * 2k grace window so the hard gate lands at 30k, under 32k-enforcing
+   * servers; on genuine 128k+ capacity it is safe to raise well past 100k.
+   */
   primaryLimit: number
   subagentLimit: number
   autoRollover: boolean
@@ -43,11 +52,11 @@ export interface HandoffConfig {
 }
 
 export const PLUGIN_DEFAULTS: HandoffConfig = {
-  primaryLimit: 24_000,
+  primaryLimit: 28_000,
   subagentLimit: 16_000,
   autoRollover: true,
   saveArtifactsDir: ".opencode/handoffs",
-  graceTokens: 4_000,
+  graceTokens: 2_000,
   deferAtSafeBoundary: true,
   maxDeferrals: 6,
   subagentGraceTokens: 2_000,
