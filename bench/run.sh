@@ -11,9 +11,12 @@
 #     work, then run ./check.sh; on failure we send a bounded number of
 #     "continue" nudges to the current (possibly handoff'd) session.
 #
-# Usage: bench/run.sh [--arm with|without|both] [--tasks "t1 t2"] [--reps N]
+# Usage: bench/run.sh [--arm with|without|updated|both] [--tasks "t1 t2"] [--reps N]
 #                     [--nudges N] [--limit 28000] [--sublimit 16000]
 #                     [--runs-dir DIR]
+# "updated" is a plugin-enabled arm like "with" but pinned (in arm-config) to the
+# grace-window commit; "with" stays pinned to the original pre-grace commit so
+# original-vs-updated comparisons run on identical harness code.
 # --sublimit pins subagentLimit in the with-arm's per-repo handoff.json; without
 # it, the plugin default (16000) applies (sub-agent handoffs happen quietly and
 # the parent handles rollover).
@@ -43,14 +46,15 @@ IDLE_TIMEOUT=1500     # seconds to wait for a session to go idle
 CHILD_GRACE=24        # seconds to wait for the plugin's idle-hook rollover after idle
 PORT_WITH=17801
 PORT_WITHOUT=17802
+PORT_UPDATED=17803
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --arm)
       case "$2" in
         both) ARMS="with without" ;;
-        with|without) ARMS="$2" ;;
-        *) echo "unknown arm: $2 (use with|without|both)" >&2; exit 2 ;;
+        with|without|updated) ARMS="$2" ;;
+        *) echo "unknown arm: $2 (use with|without|updated|both)" >&2; exit 2 ;;
       esac
       shift 2 ;;
     --tasks) TASKS="$2"; shift 2 ;;
@@ -75,7 +79,11 @@ start_server() { # arm -> sets SERVER_PID[arm], SERVER_PORT[arm], etc.
     echo "invalid arm '$arm': no bench/arm-config/$arm" >&2
     return 2
   fi
-  if [[ $arm == with ]]; then port=$PORT_WITH; else port=$PORT_WITHOUT; fi
+  case $arm in
+    with) port=$PORT_WITH ;;
+    updated) port=$PORT_UPDATED ;;
+    *) port=$PORT_WITHOUT ;;
+  esac
   local data="$RUNS_DIR/$arm/data"
   local log="$RUNS_DIR/$arm/serve.log"
   mkdir -p "$data"
@@ -83,7 +91,7 @@ start_server() { # arm -> sets SERVER_PID[arm], SERVER_PORT[arm], etc.
   [[ -n "$PIDS" ]] && kill $PIDS 2>/dev/null
   sleep 1
   local debug_env=()
-  if [[ $arm == with ]]; then debug_env=(OPENCODE_HANDOFF_DEBUG=1); fi
+  if [[ $arm != without ]]; then debug_env=(OPENCODE_HANDOFF_DEBUG=1); fi
   env "${debug_env[@]}" OPENCODE_PASSWORD=$PW \
   XDG_CONFIG_HOME="$BENCH_DIR/arm-config/$arm" \
   XDG_DATA_HOME="$data" \
@@ -143,7 +151,7 @@ run_rep() { # arm task rep
   # bound the worktree at $scratch even if RUNS_DIR is ever moved into a repo
   git -C "$scratch" init -q 2>/dev/null || true
 
-  if [[ $arm == with ]]; then
+  if [[ $arm != without ]]; then
     mkdir -p "$scratch/.opencode"
     if [[ -n "$SUBLIMIT" ]]; then
       printf '{ "primaryLimit": %d, "subagentLimit": %d }\n' "$LIMIT" "$SUBLIMIT" > "$scratch/.opencode/handoff.json"
