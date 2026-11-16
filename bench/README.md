@@ -52,6 +52,12 @@ Prefer launching long benchmarks under
   this task sits near the failure boundary where the plugin is designed to
   help: the `with` arm hands off before the wall, the `without` arm risks
   provider-side rejection/compaction.
+- `tasks/module-triage` — multi-agent task: four independent buggy modules,
+  each with a locked spec in `docs/` and its own test file. `PROMPT.md`
+  mandates spawning exactly 4 sub-agents **in parallel** in one message via
+  the task tool, and `check.sh` (`bun test`) grades all four. Subagent
+  sessions are capped by `subagentLimit` (default 16k) and complete quietly
+  when hit; the parent session handles rollover.
 
 Each task dir contains `repo/` (the scratch starting point), `PROMPT.md`, and
 `check.sh` (deterministic grader; fixes must be in source, not tests/expected).
@@ -76,15 +82,23 @@ resolved as `$OPENCODE_BIN` → `bench/bin/opencode` (untracked) → `opencode`.
 
 ## Metrics tools
 
-- `metrics.ts` — reads a snapshot copy of the arm's `opencode.db`
-  (`bun:sqlite`). Subcommands: `idle <db> <session>` (has it gone idle?),
-  `child <db> <dir> <since-id>` (newest `Resumed Handoff` session under a
-  scratch dir), `agg <db> <ids…>` (token/occupancy aggregation),
-  `active <db> <dir> <since-ms>` (suspend-corrected active time from the
-  message timeline). Used by `run.sh`; also useful ad hoc.
+- `metrics.ts` — reads the arm's live `opencode.db` (`bun:sqlite`, WAL gives
+  consistent snapshots; do not copy db+wal+shm). Subcommands: `idle <db>
+  <session>` (has it gone idle?), `child <db> <dir> <since> [--root <id>]`
+  (newest `Resumed Handoff` session under a scratch dir), `agg <db> <dir>
+  <since> [--root <id>]` (token/occupancy aggregation incl. parent/subagent
+  split), `active <db> <dir> <since> [--root <id>]` (suspend-corrected active
+  time from the message timeline). `--root <session id>` anchors the time
+  window at the root session's own DB timestamp instead of the shell's
+  `date +%s%3N`: the two clocks can disagree by a few hundred ms, which
+  silently dropped root rows (undercounted every rep-level total by exactly
+  the root's contribution). `run.sh` passes it automatically.
 - `report.ts` — aggregates `results.jsonl` into a per-task + overall arm
   comparison table (success %, wall seconds, billed tokens, hops, nudges,
   rejects).
+- `charts.ts` — full markdown report from one or more `results.jsonl` files
+  (one section per file via `--labels`): tables, ASCII bar charts, and
+  standalone SVG grouped-bar charts (`--svg-dir`).
 
 ## Methodology notes
 
@@ -138,3 +152,38 @@ Reading:
 - One `with` rep needed a nudge (model blocked once without emitting the
   artifact, produced it after the follow-up) — the nudge mechanism recovered
   it, final hop count unchanged.
+
+## Results — sub-agent task (module-triage, reps=5, limit=24000)
+
+4 parallel sub-agents per rep (task tool); `sub` columns split tokens by
+`session_v2.parent_id` (subagents have it, handoff children don't).
+
+```
+module-triage
+arm       reps  success  wall(s)  billed tok  hops  nudges  rejects
+with         5     100%    313.5     491,265   0.2     0.0     0.0
+without      5     100%    254.5     397,068   0.0     0.0     0.0
+
+arm       parent tok  sub tok  parent peak (max rep)  sub peak (max rep)
+with        225,738  265,527             26,480               14,603
+without     155,401  241,667             23,304               13,481
+```
+
+Reading:
+
+- **The plugin did not help here — it cost more.** Only one `with` rep fired a
+  handoff (r4: parent peaked 26,480 → 1 hop), and that rep burned 743k tokens
+  vs a 397k arm mean. Excluding r4, the `with` mean is still 428k vs 397k —
+  within run-to-run noise, but there is no token or wall-time win.
+- **Why the single-agent win doesn't transfer:** with 4 parallel sub-agents,
+  no context ever grows large enough to matter. Sub-agent peaks stayed at
+  11k–15k (each handles one small module) and parent peaks 13k–26k — the
+  parent only aggregates summaries, so the gate's target condition (one
+  session grinding toward the cap) rarely exists. The parent's own occupancy
+  growth in r4 was incidental, and the hop it triggered cost more (artifact +
+  fresh-context re-reading) than the high-occupancy requests it avoided.
+- **Multi-agent parallelism is itself the context-management strategy**: work
+  is sharded below any cap by construction, so a handoff gate has nothing to
+  do. Both arms hit 0 rejects.
+- Honest caveat: the `with`-arm mean is dominated by r4 (743k); medians are
+  closer (with 448k vs without 376k) but still favor `without`.

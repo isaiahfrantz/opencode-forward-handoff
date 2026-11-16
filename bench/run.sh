@@ -111,10 +111,13 @@ wait_idle() {
 }
 
 # latest_child <arm> <dir> <since_ms> <seen_ids...> -> newest unseen 'Resumed Handoff' session id
+# Uses the caller's $root (run_rep's local) to anchor the time window at the
+# root session's DB timestamp; the shell clock can drift ahead of the server's
+# and hide freshly created rows from a --since filter.
 latest_child() {
   local arm=$1 dir=$2 since=$3; shift 3
   bun "$BENCH_DIR/metrics.ts" child --db "${SERVER_DATA[$arm]}/opencode/opencode.db" \
-    --dir "$dir" --since "$since" --seen "$*" 2>/dev/null
+    --dir "$dir" --since "$since" --root "${root:-}" --seen "$*" 2>/dev/null
 }
 
 run_turn() { # arm prompt_or_session... ; echoes extracted sessionID of the turn
@@ -190,13 +193,13 @@ run_rep() { # arm task rep
   # metrics: aggregate token/cost columns for sessions rooted at this scratch dir
   local metrics
   metrics=$(bun "$BENCH_DIR/metrics.ts" agg --db "${SERVER_DATA[$arm]}/opencode/opencode.db" \
-    --dir "$scratch" --since "$since_ms" 2>/dev/null)
+    --dir "$scratch" --since "$since_ms" --root "$root" 2>/dev/null)
   # wall clocks keep running through S3 suspend, which has corrupted reps before
   # (a 4h sleep inflated one rep to 14,269s). Derive suspension-corrected active
   # time from the message timeline; fall back to raw wall if the query fails.
   local active_json active_ms
   active_json=$(bun "$BENCH_DIR/metrics.ts" active --db "${SERVER_DATA[$arm]}/opencode/opencode.db" \
-    --dir "$scratch" --since "$since_ms" 2>/dev/null)
+    --dir "$scratch" --since "$since_ms" --root "$root" 2>/dev/null)
   active_ms=$(echo "$active_json" | jq -r '.active_ms // empty' 2>/dev/null)
   [[ -z "$active_ms" ]] && active_ms=$((t1 - t0))
   local artifacts=0

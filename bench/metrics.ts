@@ -4,15 +4,15 @@
  * Subcommands:
  *   idle  --db <path> --session <id>
  *         prints "idle" when the session exists and is not busy, else "busy"
- *   child --db <path> --dir <scratch-dir> --since <ms> --seen "<id id ...>"
+ *   child --db <path> --dir <scratch-dir> --since <ms> --seen "<id id ...>" [--root <id>]
  *         prints the newest unseen "Resumed Handoff (…)" session id in dir, or ""
- *   agg   --db <path> --dir <scratch-dir> --since <ms>
+ *   agg   --db <path> --dir <scratch-dir> --since <ms> [--root <id>]
  *         prints JSON aggregates over all sessions created in dir after since:
  *         summed tokens, peak_occupancy (max last-message metric across
  *         sessions, as the plugin gate sees it), handoffs (Resumed Handoff
  *         children), the parent-chain vs subagent split (task-tool subagents
  *         have parent_id set; handoff children do not), per-session breakdown
- *   active --db <path> --dir <scratch-dir> --since <ms> [--cap 300000]
+ *   active --db <path> --dir <scratch-dir> --since <ms> [--cap 300000] [--root <id>]
  *         prints JSON {span_ms, active_ms, dead_ms, largest_gap_ms} derived from
  *         the merged message timeline of all sessions in dir. Inter-message gaps
  *         above --cap (default 5 min) are treated as dead time (machine suspend,
@@ -40,6 +40,26 @@ function openSnapshot(dbPath: string): Database {
   return db
 }
 
+/**
+ * When --root <session id> is given, anchor the "created after" window at the
+ * root session's own DB timestamp instead of the shell's --since. Shell
+ * `date +%s%3N` and the server's clock can disagree by a few hundred ms
+ * (NTP slew / suspend steps), which silently dropped the root row — and with
+ * it its tokens and peak — from a handful of reps. Every row we care about
+ * (root, its handoff children, its task-tool subagents) is stamped by the
+ * same server process, so root-anchoring is internally consistent.
+ */
+function sinceMs(db: Database, fallback: number): number {
+  const root = arg("root")
+  if (root) {
+    const row = db
+      .query("select time_created from session_v2 where id = ?1")
+      .get(root) as { time_created: number } | null
+    if (row) return row.time_created
+  }
+  return fallback
+}
+
 type Row = Record<string, unknown>
 
 const cmd = process.argv[2]
@@ -56,17 +76,19 @@ if (cmd === "idle") {
 } else if (cmd === "child") {
   const db = openSnapshot(arg("db"))
   const seen = new Set(arg("seen").split(/\s+/).filter(Boolean))
+  const since = sinceMs(db, Number(arg("since")))
   const rows = db
     .query(
       `select id from session_v2
        where directory = ?1 and title like 'Resumed Handoff%' and time_created >= ?2
        order by time_created desc, id desc`
     )
-    .all(arg("dir"), Number(arg("since"))) as Array<{ id: string }>
+    .all(arg("dir"), since) as Array<{ id: string }>
   const hit = rows.find((r) => !seen.has(r.id))
   if (hit) console.log(hit.id)
 } else if (cmd === "agg") {
   const db = openSnapshot(arg("db"))
+  const since = sinceMs(db, Number(arg("since")))
   const rows = db
     .query(
       `select id, title, parent_id, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, cost
@@ -74,7 +96,7 @@ if (cmd === "idle") {
        where directory = ?1 and time_created >= ?2
        order by time_created`
     )
-    .all(arg("dir"), Number(arg("since"))) as Array<{
+    .all(arg("dir"), since) as Array<{
     id: string
     title: string
     parent_id: string | null
@@ -149,11 +171,12 @@ if (cmd === "idle") {
 } else if (cmd === "active") {
   const db = openSnapshot(arg("db"))
   const cap = Number(arg("cap") || 300000)
+  const since = sinceMs(db, Number(arg("since")))
   const rows = db
     .query(
       `select id from session_v2 where directory = ?1 and time_created >= ?2`
     )
-    .all(arg("dir"), Number(arg("since"))) as Array<{ id: string }>
+    .all(arg("dir"), since) as Array<{ id: string }>
   const times: number[] = []
   for (const r of rows) {
     const msgs = db
