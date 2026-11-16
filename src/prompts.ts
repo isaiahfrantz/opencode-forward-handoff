@@ -85,7 +85,7 @@ export const buildSubagentPriming = (hardLimit: number) =>
     "",
     `[handoff] Context budget: this sub-agent session is cut off near ${hardLimit} tokens.`,
     "Work lean: targeted reads over bulk exploration; never re-read files you already mapped.",
-    "Your final message is the parent's ONLY copy of your work and stays resident in the parent's context, so keep it under 300 tokens — exactly this relay schema, no prose or code blocks:",
+    "Your final message is the parent's ONLY copy of your work and stays resident in the parent's context, so keep it under 300 tokens — exactly this relay schema, no prose or code blocks. Your reply must begin with the `TASK:` line:",
     "TASK: <assigned task, one line> — done | partial | blocked",
     "CHANGED: <path — verified change> (one per line; 'none' if read-only)",
     "CHECKS: <command → pass/fail> (or 'none')",
@@ -101,7 +101,7 @@ export const buildSubagentPriming = (hardLimit: number) =>
 export const buildSubagentSummaryPrompt = (current: number, limit: number) =>
   [
     `SUBAGENT CONTEXT LIMIT REACHED (${current}/${limit} tokens). Halt all tool calls immediately.`,
-    "Reply with ONLY this ≤300-token relay summary — no prose, no code blocks:",
+    "Reply with ONLY this ≤300-token relay summary, beginning with the `TASK:` line — no prose, no code blocks:",
     "TASK: <assigned task, one line> — done | partial | blocked",
     "CHANGED: <path — verified change> (one per line; 'none' if read-only)",
     "CHECKS: <command → pass/fail> (or 'none')",

@@ -466,6 +466,7 @@ describe("forward-handoff rollover (end-to-end)", () => {
       /2500\/2000/
     )
     expect(state.prompts[0].text).toContain("SUBAGENT CONTEXT LIMIT REACHED (2500/2000 tokens)")
+    expect(state.prompts[0].text).toContain("beginning with the `TASK:` line")
     expect(state.synthetics).toHaveLength(0) // no grace/deferral nudges
 
     await cleanup?.()
@@ -479,6 +480,7 @@ describe("forward-handoff rollover (end-to-end)", () => {
     expect(state.promptTexts["ses_sub"]).toContain("[handoff] Context budget")
     expect(state.promptTexts["ses_sub"]).toContain("cut off near 4000 tokens") // 2000 limit + 2000 grace
     expect(state.promptTexts["ses_sub"]).toContain("relay schema")
+    expect(state.promptTexts["ses_sub"]).toContain("Your reply must begin with the `TASK:` line")
     expect(state.promptTexts["ses_sub"]).toContain("TASK:")
     expect(state.promptTexts["ses_sub"]).toContain("NEXT:")
 
