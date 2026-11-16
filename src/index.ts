@@ -2,7 +2,14 @@ import { Plugin } from "@opencode/plugin"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { type HandoffConfig, loadConfig, runtimeOverrides } from "./config.js"
-import { buildDeferralNote, buildGeneratorPrompt, buildGraceWarning, buildResumePrompt } from "./prompts.js"
+import {
+  buildDeferralNote,
+  buildGeneratorPrompt,
+  buildGraceWarning,
+  buildResumePrompt,
+  buildSubagentPriming,
+  buildSubagentSummaryPrompt,
+} from "./prompts.js"
 
 // Approximate context occupancy from the latest assistant message's prompt-side
 // token usage (input + cache read), matching what the model actually sees.
@@ -95,6 +102,7 @@ export default Plugin.define({
     const sessionWorktree = new Map<string, string>()
     const graceWarned = new Set<string>()
     const deferralCount = new Map<string, number>()
+    const subagentPrimed = new Set<string>()
     const abortController = new AbortController()
 
     const getServerWorktree = () =>
@@ -224,6 +232,7 @@ export default Plugin.define({
             sessionWorktree.delete(id)
             graceWarned.delete(id)
             deferralCount.delete(id)
+            subagentPrimed.delete(id)
           }
         }
       } catch {
@@ -231,7 +240,33 @@ export default Plugin.define({
       }
     })()
 
-    // 3. Auto-rollover when an outgoing primary session finishes generating its artifact
+    // 3. Prime sub-agents with the relay contract on their first prompt: their
+    //    final message is the parent's only copy AND stays resident in the
+    //    parent's re-sent context, so pinning a compact ≤300-token report
+    //    format up front keeps every parent turn cheaper — even if the gate
+    //    never fires. Riding the first prompt itself adds no extra message.
+    await ctx.session.hook("prompt", async (input) => {
+      if (subagentPrimed.has(input.sessionID)) return
+      let subagent = isSubagent.get(input.sessionID)
+      if (subagent === undefined) {
+        // session.created may not have been consumed yet; resolve directly.
+        try {
+          const info = await ctx.session.get({ sessionID: input.sessionID })
+          subagent = Boolean((info as { parentID?: string }).parentID)
+        } catch {
+          return
+        }
+        isSubagent.set(input.sessionID, subagent)
+      }
+      if (!subagent) return
+      subagentPrimed.add(input.sessionID)
+
+      const cfg = loadConfig(await resolveWorktree(input.sessionID), pluginOptions)
+      if (!cfg.subagentPriming) return
+      input.prompt.text += buildSubagentPriming(cfg.subagentLimit + cfg.subagentGraceTokens)
+    })
+
+    // 4. Auto-rollover when an outgoing primary session finishes generating its artifact
     await ctx.session.hook("experimental.idle", async (input) => {
       const sessionID = input.sessionID
       if (!handoffPending.has(sessionID) || rolloverCompleted.has(sessionID)) return
@@ -283,23 +318,26 @@ export default Plugin.define({
       }
     })
 
-    // 4. Gate tool execution on the session's context budget.
-    //    Primary sessions use three bands:
+    // 4. Gate tool execution on the session's context budget. Both session
+    //    kinds use three bands (subagents with subagentGraceTokens = 0 keep
+    //    the original single-threshold behaviour):
     //      < softLimit              -> allow
     //      [softLimit, hardLimit)   -> grace band: warn once, keep working
     //      >= hardLimit             -> hard gate: force handoff, unless the
     //                                  session sits at a safe boundary (no
     //                                  in-flight mutation, todos all done) and
     //                                  the call is read-only → defer (bounded)
-    //    Subagent sessions keep the original single-threshold behaviour.
+    //    A subagent's hard gate fires the relay-summary prompt instead of the
+    //    full artifact generator — subagents never roll over to a new session.
     await ctx.tool.hook("execute.before", async (input) => {
       const worktree = await resolveWorktree(input.sessionID)
       const cfg = loadConfig(worktree, pluginOptions)
       const ctxMsgs = await ctx.session.context({ sessionID: input.sessionID })
       const currentTokens = occupancyFromMessages(ctxMsgs)
       const subagent = isSubagent.get(input.sessionID) ?? false
+      const grace = subagent ? cfg.subagentGraceTokens : cfg.graceTokens
       const softLimit = subagent ? cfg.subagentLimit : cfg.primaryLimit
-      const hardLimit = subagent ? cfg.subagentLimit : cfg.primaryLimit + cfg.graceTokens
+      const hardLimit = softLimit + grace
 
       if (process.env.OPENCODE_HANDOFF_DEBUG) {
         console.error(
@@ -318,20 +356,21 @@ export default Plugin.define({
 
       // Grace band: nudge the model to wind down but do not block yet, so the
       // unit of work in progress can finish cleanly instead of being cut off.
-      if (!subagent && currentTokens < hardLimit) {
+      // Empty band (grace = 0) falls straight through to the hard gate.
+      if (currentTokens < hardLimit) {
         if (!graceWarned.has(input.sessionID)) {
           graceWarned.add(input.sessionID)
           await ctx.session.synthetic({
             sessionID: input.sessionID,
             resume: false,
-            text: buildGraceWarning(currentTokens, softLimit, hardLimit),
+            text: buildGraceWarning(currentTokens, softLimit, hardLimit, subagent),
           })
         }
         return
       }
 
       // Hard gate. Optionally defer while the session is at a safe boundary.
-      if (!subagent && cfg.deferAtSafeBoundary && !MUTATING_TOOL.test(input.tool)) {
+      if (cfg.deferAtSafeBoundary && !MUTATING_TOOL.test(input.tool)) {
         const boundary = !hasInFlightMutation(ctxMsgs) && todosAtBoundary(ctxMsgs)
         const deferred = deferralCount.get(input.sessionID) ?? 0
         if (boundary && deferred < cfg.maxDeferrals) {
@@ -340,7 +379,7 @@ export default Plugin.define({
             await ctx.session.synthetic({
               sessionID: input.sessionID,
               resume: false,
-              text: buildDeferralNote(currentTokens, hardLimit),
+              text: buildDeferralNote(currentTokens, hardLimit, subagent),
             })
           }
           return
@@ -349,8 +388,11 @@ export default Plugin.define({
 
       if (!handoffPending.has(input.sessionID)) {
         handoffPending.add(input.sessionID)
+        // Subagents get the compact relay contract (their final message is the
+        // parent's only copy and stays resident in its context); primaries get
+        // the full handoff-artifact generator.
         const promptText = subagent
-          ? `SUBAGENT CONTEXT LIMIT REACHED (${currentTokens}/${softLimit} tokens). Halt all tool calls immediately and return a concise summary (<400 tokens) of verified changes, failed attempts, and remaining steps to the parent agent.`
+          ? buildSubagentSummaryPrompt(currentTokens, softLimit)
           : buildGeneratorPrompt(currentTokens, softLimit)
 
         await ctx.session.prompt({
@@ -360,7 +402,8 @@ export default Plugin.define({
       }
 
       throw new Error(
-        `Context cap (${currentTokens}/${softLimit} tokens) reached. Tool "${input.tool}" blocked—emit your handoff summary now.`
+        `Context cap (${currentTokens}/${softLimit} tokens) reached. Tool "${input.tool}" blocked—` +
+          (subagent ? "emit your relay summary now." : "emit your handoff summary now.")
       )
     })
 

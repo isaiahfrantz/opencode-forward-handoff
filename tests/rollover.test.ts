@@ -76,12 +76,17 @@ afterEach(() => {
   delete runtimeOverrides.subagentLimit
 })
 
-async function startPlugin(events: unknown[] = [], sessionDirs: Record<string, string> = {}) {
+async function startPlugin(
+  events: unknown[] = [],
+  sessionDirs: Record<string, string> = {},
+  sessionParents: Record<string, string> = {}
+) {
   const state = {
     messages: [] as unknown[],
     prompts: [] as PromptCall[],
     synthetics: [] as PromptCall[],
     created: [] as { title?: string; location?: { directory?: string } }[],
+    promptTexts: {} as Record<string, string>,
   }
   const hooks: Record<string, (input: any) => Promise<unknown>> = {}
 
@@ -92,12 +97,22 @@ async function startPlugin(events: unknown[] = [], sessionDirs: Record<string, s
     event: { subscribe: () => events },
     session: {
       hook: async (name: string, handler: any) => {
-        hooks[name] = handler
+        if (name === "prompt") {
+          // record the post-hook prompt text so tests can assert priming
+          hooks[name] = async (input: any) => {
+            await handler(input)
+            state.promptTexts[input.sessionID] = input.prompt.text
+          }
+        } else {
+          hooks[name] = handler
+        }
       },
       get: async (input: { sessionID: string }) => {
-        const dir = sessionDirs[input.sessionID]
-        if (!dir) throw new Error("SessionNotFoundError")
-        return { id: input.sessionID, location: { directory: dir } }
+        const dir = sessionDirs[input.sessionID] ?? sandbox
+        const parentID = sessionParents[input.sessionID]
+        if (!sessionDirs[input.sessionID] && parentID === undefined)
+          throw new Error("SessionNotFoundError")
+        return { id: input.sessionID, parentID, location: { directory: dir } }
       },
       context: async () => state.messages,
       prompt: async (input: PromptCall) => {
@@ -194,12 +209,19 @@ describe("forward-handoff rollover (end-to-end)", () => {
       { type: "session.created", data: { sessionID: "ses_sub", parentID: "ses_primary" } },
     ])
 
-    // 2500 tokens exceeds the subagent limit (2000), not the primary limit
+    // 2500 is inside the subagent grace band (2000-4000): allowed with nudge
     state.messages = [assistantMessage(2_500, 0)]
+    await hooks["tool.execute.before"]!({ sessionID: "ses_sub", tool: "shell" })
+    expect(state.prompts).toHaveLength(0)
+    expect(state.synthetics).toHaveLength(1)
+    expect(state.synthetics[0].text).toContain("CONTEXT APPROACHING LIMIT")
+
+    // 4500 exceeds the subagent hard gate (2000+2000), not the primary limit
+    state.messages = [assistantMessage(4_500, 0)]
     await expect(hooks["tool.execute.before"]!({ sessionID: "ses_sub", tool: "shell" })).rejects.toThrow(
-      /2500\/2000/
+      /4500\/2000/
     )
-    expect(state.prompts[0].text).toContain("SUBAGENT CONTEXT LIMIT REACHED (2500/2000 tokens)")
+    expect(state.prompts[0].text).toContain("SUBAGENT CONTEXT LIMIT REACHED (4500/2000 tokens)")
 
     await hooks["experimental.idle"]!({ sessionID: "ses_sub" })
     expect(state.created).toHaveLength(0)
@@ -405,18 +427,79 @@ describe("forward-handoff rollover (end-to-end)", () => {
     await cleanup?.()
   })
 
-  it("subagent gate ignores the grace band (original single-threshold behavior)", async () => {
+  it("subagent hard gate defers at a safe boundary and forces at the next mutating step", async () => {
     const { state, hooks, cleanup } = await startPlugin([
       { type: "session.created", data: { sessionID: "ses_sub", parentID: "ses_primary" } },
     ])
     const toolHook = hooks["tool.execute.before"]!
 
-    // subagentLimit 2000; 2500 tokens is well within primary's grace band
-    // but the subagent path must fire immediately with the summary prompt
+    // Hard gate is 2000+2000=4000. Occupancy 4500 over a read-only step with no
+    // in-flight mutation defers like a primary session.
+    state.messages = [assistantMessage(4_500, 0, undefined, [toolPart("read", "completed")])]
+    await toolHook({ sessionID: "ses_sub", tool: "read" })
+    expect(state.prompts).toHaveLength(0)
+    expect(state.synthetics.some((p: { text: string }) => p.text.includes("handoff deferred"))).toBe(
+      true
+    )
+
+    // A mutating step is not a safe boundary: forced relay summary. Read-only
+    // tools are excluded from deferral to prevent an infinite deferral loop.
+    await expect(toolHook({ sessionID: "ses_sub", tool: "edit" })).rejects.toThrow(/Context cap/)
+    expect(state.prompts[0].text).toContain("SUBAGENT CONTEXT LIMIT REACHED")
+
+    await cleanup?.()
+  })
+
+  it("subagentGraceTokens: 0 restores the original single-threshold behavior", async () => {
+    writeFileSync(
+      join(sandbox, ".opencode", "handoff.json"),
+      JSON.stringify({ primaryLimit: 5_000, subagentLimit: 2_000, subagentGraceTokens: 0 })
+    )
+    const { state, hooks, cleanup } = await startPlugin([
+      { type: "session.created", data: { sessionID: "ses_sub", parentID: "ses_primary" } },
+    ])
+
+    // Hard gate is just subagentLimit (2000): a mutating step at 2500 — which
+    // the default grace band would have allowed — fires immediately.
     state.messages = [assistantMessage(2_500, 0)]
-    await expect(toolHook({ sessionID: "ses_sub", tool: "read" })).rejects.toThrow(/2500\/2000/)
+    await expect(hooks["tool.execute.before"]!({ sessionID: "ses_sub", tool: "write" })).rejects.toThrow(
+      /2500\/2000/
+    )
     expect(state.prompts[0].text).toContain("SUBAGENT CONTEXT LIMIT REACHED (2500/2000 tokens)")
-    expect(state.synthetics).toHaveLength(0) // no grace/deferral nudges for subagents
+    expect(state.synthetics).toHaveLength(0) // no grace/deferral nudges
+
+    await cleanup?.()
+  })
+
+  it("first sub-agent prompt is primed with the relay contract (and only once)", async () => {
+    const { state, hooks, cleanup } = await startPlugin([], {}, { ses_sub: "ses_primary" })
+    const promptHook = hooks["prompt"]!
+
+    await promptHook({ sessionID: "ses_sub", prompt: { text: "Audit module alpha." } })
+    expect(state.promptTexts["ses_sub"]).toContain("[handoff] Context budget")
+    expect(state.promptTexts["ses_sub"]).toContain("cut off near 4000 tokens") // 2000 limit + 2000 grace
+    expect(state.promptTexts["ses_sub"]).toContain("relay schema")
+    expect(state.promptTexts["ses_sub"]).toContain("TASK:")
+    expect(state.promptTexts["ses_sub"]).toContain("NEXT:")
+
+    await promptHook({ sessionID: "ses_sub", prompt: { text: "Continue." } })
+    expect(state.promptTexts["ses_sub"]).toBe("Continue.") // primed once per session
+
+    // Primary sessions are never primed
+    await promptHook({ sessionID: "ses_primary", prompt: { text: "Hello." } })
+    expect(state.promptTexts["ses_primary"]).toBe("Hello.")
+
+    await cleanup?.()
+  })
+
+  it("subagentPriming: false leaves the first prompt untouched", async () => {
+    writeFileSync(
+      join(sandbox, ".opencode", "handoff.json"),
+      JSON.stringify({ primaryLimit: 5_000, subagentLimit: 2_000, subagentPriming: false })
+    )
+    const { state, hooks, cleanup } = await startPlugin([], {}, { ses_sub: "ses_primary" })
+    await hooks["prompt"]!({ sessionID: "ses_sub", prompt: { text: "Audit module alpha." } })
+    expect(state.promptTexts["ses_sub"]).toBe("Audit module alpha.")
 
     await cleanup?.()
   })

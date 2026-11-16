@@ -46,7 +46,7 @@ Precedence in `loadConfig()` (`src/config.ts`), lowest → highest:
 
 1. `PLUGIN_DEFAULTS` — `primaryLimit: 24000`, `subagentLimit: 16000`, `autoRollover: true`,
    `saveArtifactsDir: ".opencode/handoffs"`, `graceTokens: 4000`, `deferAtSafeBoundary: true`,
-   `maxDeferrals: 6`
+   `maxDeferrals: 6`, `subagentGraceTokens: 2000`, `subagentPriming: true`
 2. Plugin options passed via `opencode.json` (`{ "package": "...", "options": {...} }`)
 3. Env vars `OPENCODE_PRIMARY_LIMIT` / `OPENCODE_SUBAGENT_LIMIT` / `OPENCODE_GRACE_TOKENS`
 4. First JSON file found: `<worktree>/.opencode/handoff.json`, then `~/.config/opencode/handoff.json`
@@ -60,17 +60,20 @@ the next tool call (except `runtimeOverrides`, which only `/handoff-limit reset`
 1. **Hierarchy tracking** — a `ctx.event.subscribe()` loop records
    `isSubagent[sessionID] = Boolean(parentID)` on `session.created`; cleanup on
    `session.deleted`.
-2. **Gate** — `ctx.tool.hook("execute.before")` computes occupancy in three bands (primary
-   sessions): below `primaryLimit` → allow (and reset `graceWarned`/`deferralCount`);
-   within `[primaryLimit, primaryLimit + graceTokens)` → inject the grace warning
-   (`buildGraceWarning`) once, still allow; at/above the hard limit → force handoff unless
-   `deferAtSafeBoundary` allows a deferral: the tool call is read-only (`MUTATING_TOOL` regex),
-   no mutation is in flight (`hasInFlightMutation`), the todo list is empty or fully completed
-   (`todosAtBoundary`), and `maxDeferrals` isn't exhausted. Forcing injects the generator prompt
+2. **Gate** — `ctx.tool.hook("execute.before")` computes occupancy in three bands, for both
+   session kinds: below the soft limit → allow (and reset `graceWarned`/`deferralCount`);
+   within `[soft, soft + grace)` → inject the grace warning (`buildGraceWarning`) once, still
+   allow; at/above the hard limit → force handoff unless `deferAtSafeBoundary` allows a
+   deferral: the tool call is read-only (`MUTATING_TOOL` regex), no mutation is in flight
+   (`hasInFlightMutation`), the todo list is empty or fully completed (`todosAtBoundary`), and
+   `maxDeferrals` isn't exhausted. Forcing injects the generator prompt
    (`buildGeneratorPrompt`), marks `handoffPending`, then **throws** to block the tool call —
    throwing is the only way to refuse a tool call. The first deferral injects `buildDeferralNote`
-   so the model knows it has limited runway. Subagent sessions keep the single-threshold
-   behavior (no grace/deferral).
+   so the model knows it has limited runway. Bands are `(primaryLimit, primaryLimit +
+   graceTokens)` for primary sessions and `(subagentLimit, subagentLimit +
+   subagentGraceTokens)` for subagents (`subagentGraceTokens: 0` restores the original
+   single-threshold behavior). Forcing a subagent injects `buildSubagentSummaryPrompt` instead
+   of the generator prompt.
 3. **Rollover** — `ctx.session.hook("experimental.idle")` fires when the pending session
    goes idle. It looks for `# SESSION HANDOFF ARTIFACT` in the last assistant message's
    `text` content parts (V2 message schema: `m.type === "assistant"`, `m.content[]`),
@@ -92,6 +95,14 @@ the next tool call (except `runtimeOverrides`, which only `/handoff-limit reset`
   the artifact, and executing Section 5 immediately.
 - `buildGraceWarning` / `buildDeferralNote` — synthetic nudges for the grace band and the
   first safe-boundary deferral respectively; injected once per session/band, never block.
+  Both take a `subagent` flag that switches wording ("relay summary" vs "handoff").
+- `buildSubagentPriming(hardLimit)` — relay-contract primer appended (once per session,
+  `subagentPrimed` set) to every sub-agent's **first prompt** via `ctx.session.hook("prompt")`
+  by mutating `input.prompt.text` in place (adds no extra message). Pins the ≤300-token
+  TASK / CHANGED / CHECKS / FAILED / NEXT relay schema up front; disabled by
+  `subagentPriming: false`.
+- `buildSubagentSummaryPrompt(current, limit)` — injected when a subagent's hard gate fires;
+  self-contained (schema inline) so it works even when priming is off.
 
 ## Commands
 

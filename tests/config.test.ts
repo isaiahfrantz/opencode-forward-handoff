@@ -116,4 +116,27 @@ describe("loadConfig", () => {
     expect(cfg.deferAtSafeBoundary).toBe(false)
     expect(cfg.maxDeferrals).toBe(2)
   })
+
+  it("subagent grace and priming default to enabled", () => {
+    const cfg = loadConfig(sandbox)
+    expect(cfg.subagentGraceTokens).toBe(2_000)
+    expect(cfg.subagentPriming).toBe(true)
+  })
+
+  it("config file can disable the subagent grace band and priming", () => {
+    mkdirSync(join(sandbox, ".opencode"), { recursive: true })
+    writeFileSync(
+      join(sandbox, ".opencode", "handoff.json"),
+      JSON.stringify({ subagentGraceTokens: 0, subagentPriming: false })
+    )
+    const cfg = loadConfig(sandbox)
+    expect(cfg.subagentGraceTokens).toBe(0)
+    expect(cfg.subagentPriming).toBe(false)
+  })
+
+  it("plugin options carry subagent grace and priming", () => {
+    const cfg = loadConfig(sandbox, { subagentGraceTokens: 3_500, subagentPriming: false })
+    expect(cfg.subagentGraceTokens).toBe(3_500)
+    expect(cfg.subagentPriming).toBe(false)
+  })
 })

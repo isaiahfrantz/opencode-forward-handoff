@@ -24,6 +24,22 @@ export interface HandoffConfig {
   deferAtSafeBoundary: boolean
   /** How many safe-boundary tool calls may be deferred before forcing. */
   maxDeferrals: number
+  /**
+   * Subagent equivalent of graceTokens: occupancy band between
+   * subagentLimit and subagentLimit + subagentGraceTokens where the sub-agent
+   * gets a wind-down warning instead of an immediate forced summary. Sub-agents
+   * never roll over; the band just lets them finish a step before summarizing.
+   * 0 restores the old fail-fast behaviour.
+   */
+  subagentGraceTokens: number
+  /**
+   * Append the relay-contract primer (budget notice + compact ≤300-token
+   * summary schema) to each sub-agent's first prompt. Cost is a few dozen
+   * tokens once; the payoff is short final reports even when the gate never
+   * fires, since a sub-agent's final message stays resident in the parent's
+   * re-sent context.
+   */
+  subagentPriming: boolean
 }
 
 export const PLUGIN_DEFAULTS: HandoffConfig = {
@@ -34,6 +50,8 @@ export const PLUGIN_DEFAULTS: HandoffConfig = {
   graceTokens: 4_000,
   deferAtSafeBoundary: true,
   maxDeferrals: 6,
+  subagentGraceTokens: 2_000,
+  subagentPriming: true,
 }
 
 export const runtimeOverrides: Partial<HandoffConfig> = {}
