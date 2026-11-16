@@ -22,6 +22,28 @@ function assistantMessage(input: number, cacheRead: number, text = "") {
   }
 }
 
+// Assistant message carrying raw content parts (tool calls with state).
+function assistantWithParts(input: number, cacheRead: number, parts: unknown[]) {
+  return {
+    type: "assistant",
+    tokens: { input, cache: { read: cacheRead } },
+    content: parts,
+  }
+}
+
+function toolPart(name: string, status: string, todoStatuses?: string[]) {
+  return {
+    type: "tool",
+    name,
+    state: {
+      status,
+      ...(todoStatuses
+        ? { input: { todos: todoStatuses.map((s) => ({ status: s })) } }
+        : {}),
+    },
+  }
+}
+
 let sandbox: string
 let realHome: string | undefined
 
@@ -58,6 +80,7 @@ async function startPlugin(events: unknown[] = [], sessionDirs: Record<string, s
   const state = {
     messages: [] as unknown[],
     prompts: [] as PromptCall[],
+    synthetics: [] as PromptCall[],
     created: [] as { title?: string; location?: { directory?: string } }[],
   }
   const hooks: Record<string, (input: any) => Promise<unknown>> = {}
@@ -84,7 +107,9 @@ async function startPlugin(events: unknown[] = [], sessionDirs: Record<string, s
         state.created.push(input)
         return { id: "ses_new" }
       },
-      synthetic: async (_input: PromptCall) => {},
+      synthetic: async (input: PromptCall) => {
+        state.synthetics.push(input)
+      },
     },
     tool: {
       hook: async (name: string, handler: any) => {
@@ -109,14 +134,15 @@ describe("forward-handoff rollover (end-to-end)", () => {
     await expect(toolHook({ sessionID: "ses_primary", tool: "shell" })).resolves.toBeUndefined()
     expect(state.prompts).toHaveLength(0)
 
-    // Over limit: occupancy = max over completed assistant messages (3000 + 4000 = 7000 > 5000)
-    state.messages = [assistantMessage(1_000, 200), assistantMessage(3_000, 4_000)]
+    // Over the HARD gate (primaryLimit 5000 + graceTokens 4000 = 9000):
+    // occupancy = max over completed assistant messages (5000 + 4500 = 9500)
+    state.messages = [assistantMessage(1_000, 200), assistantMessage(5_000, 4_500)]
     await expect(toolHook({ sessionID: "ses_primary", tool: "shell" })).rejects.toThrow(
-      /Context cap \(7000\/5000/
+      /Context cap \(9500\/5000/
     )
     expect(state.prompts).toHaveLength(1)
     expect(state.prompts[0].sessionID).toBe("ses_primary")
-    expect(state.prompts[0].text).toContain("CONTEXT BUDGET REACHED (7000/5000 tokens)")
+    expect(state.prompts[0].text).toContain("CONTEXT BUDGET REACHED (9500/5000 tokens)")
     expect(state.prompts[0].text).toContain("# SESSION HANDOFF ARTIFACT")
 
     // Blocked again, but the handoff prompt is not injected twice
@@ -150,13 +176,13 @@ describe("forward-handoff rollover (end-to-end)", () => {
 
     // Real runtime shape from ctx.session.context(): the assistant message being
     // generated has no `tokens` yet. The gate must fall back to the last
-    // COMPLETED assistant message instead of reading 0.
+    // COMPLETED assistant message instead of reading 0. (9500 ≥ hard gate 9000)
     state.messages = [
-      assistantMessage(3_000, 4_000),
+      assistantMessage(5_000, 4_500),
       { type: "assistant", content: [] }, // in-flight message, tokens === undefined
     ]
     await expect(toolHook({ sessionID: "ses_primary", tool: "shell" })).rejects.toThrow(
-      /Context cap \(7000\/5000/
+      /Context cap \(9500\/5000/
     )
     expect(state.prompts).toHaveLength(1)
 
@@ -217,17 +243,18 @@ describe("forward-handoff rollover (end-to-end)", () => {
       { ses_fetch: repo2 }
     )
 
-    // 3500 tokens: under the server's 5000, over repo2's 3000 -> must block.
-    state.messages = [assistantMessage(3_500, 0)]
+    // 7500 tokens: under the server's hard gate (5000+4000=9000), over repo2's
+    // hard gate (3000+4000=7000) -> must block, following the session not server.
+    state.messages = [assistantMessage(7_500, 0)]
     await expect(
       hooks["tool.execute.before"]!({ sessionID: "ses_event", tool: "shell" })
-    ).rejects.toThrow(/3500\/3000/)
+    ).rejects.toThrow(/7500\/3000/)
     await expect(
       hooks["tool.execute.before"]!({ sessionID: "ses_fetch", tool: "shell" })
-    ).rejects.toThrow(/3500\/3000/)
+    ).rejects.toThrow(/7500\/3000/)
 
     // Artifact lands in the session's repo; the child inherits its location.
-    state.messages = [assistantMessage(3_500, 0, ARTIFACT)]
+    state.messages = [assistantMessage(7_500, 0, ARTIFACT)]
     await hooks["experimental.idle"]!({ sessionID: "ses_event" })
 
     const files = readdirSync(join(repo2, ".opencode", "handoffs"))
@@ -235,6 +262,161 @@ describe("forward-handoff rollover (end-to-end)", () => {
     expect(state.created).toHaveLength(1)
     expect(state.created[0].location?.directory).toBe(repo2)
     expect(existsSync(join(sandbox, ".opencode", "handoffs"))).toBe(false)
+
+    await cleanup?.()
+  })
+
+  it("grace band: warns once and keeps all tools allowed below the hard gate", async () => {
+    const { state, hooks, cleanup } = await startPlugin()
+    const toolHook = hooks["tool.execute.before"]!
+
+    // soft 5000, hard 5000 + 4000 = 9000; occupancy 7000 sits inside the band
+    state.messages = [assistantMessage(5_000, 2_000)]
+    await expect(toolHook({ sessionID: "ses_primary", tool: "read" })).resolves.toBeUndefined()
+    await expect(toolHook({ sessionID: "ses_primary", tool: "edit" })).resolves.toBeUndefined()
+    expect(state.prompts).toHaveLength(0) // no handoff prompt yet
+
+    expect(state.synthetics).toHaveLength(1)
+    expect(state.synthetics[0].sessionID).toBe("ses_primary")
+    expect(state.synthetics[0].text).toContain("CONTEXT APPROACHING LIMIT (7000/9000")
+    expect(state.synthetics[0].text).toContain("soft limit 5000")
+
+    // the nudge fires only once per session
+    await toolHook({ sessionID: "ses_primary", tool: "read" })
+    expect(state.synthetics).toHaveLength(1)
+
+    await cleanup?.()
+  })
+
+  it("grace state resets when occupancy drops back below the soft limit", async () => {
+    const { state, hooks, cleanup } = await startPlugin()
+    const toolHook = hooks["tool.execute.before"]!
+
+    state.messages = [assistantMessage(5_000, 2_000)] // 7000: grace band
+    await toolHook({ sessionID: "ses_primary", tool: "read" })
+    expect(state.synthetics).toHaveLength(1)
+
+    state.messages = [assistantMessage(1_000, 0)] // 1000: back below soft limit
+    await toolHook({ sessionID: "ses_primary", tool: "read" })
+    expect(state.synthetics).toHaveLength(1)
+
+    state.messages = [assistantMessage(5_000, 2_500)] // 7500: grace band again
+    await toolHook({ sessionID: "ses_primary", tool: "read" })
+    expect(state.synthetics).toHaveLength(2) // re-warned
+
+    await cleanup?.()
+  })
+
+  it("hard gate defers read-only calls at a safe boundary and forces on the next mutation", async () => {
+    const { state, hooks, cleanup } = await startPlugin()
+    const toolHook = hooks["tool.execute.before"]!
+
+    // occupancy 9500 ≥ hard 9000; no todo list → safe boundary
+    state.messages = [assistantMessage(9_000, 500)]
+    await expect(toolHook({ sessionID: "ses_primary", tool: "read" })).resolves.toBeUndefined()
+    expect(state.prompts).toHaveLength(0)
+    expect(state.synthetics).toHaveLength(1)
+    expect(state.synthetics[0].text).toContain("handoff deferred")
+    expect(state.synthetics[0].text).toContain("9500/9000")
+
+    // more read-only calls keep being deferred, note is not repeated
+    await expect(toolHook({ sessionID: "ses_primary", tool: "grep" })).resolves.toBeUndefined()
+    expect(state.synthetics).toHaveLength(1)
+
+    // the next state-changing step forces the handoff
+    await expect(toolHook({ sessionID: "ses_primary", tool: "edit" })).rejects.toThrow(
+      /Context cap \(9500\/5000/
+    )
+    expect(state.prompts).toHaveLength(1)
+    expect(state.prompts[0].text).toContain("CONTEXT BUDGET REACHED (9500/5000 tokens)")
+
+    await cleanup?.()
+  })
+
+  it("deferral requires a safe boundary: in-flight mutation or open todos force the gate", async () => {
+    const { state, hooks, cleanup } = await startPlugin()
+    const toolHook = hooks["tool.execute.before"]!
+
+    // mutating tool still running while the gate sees the next (read-only) call
+    state.messages = [
+      assistantWithParts(9_000, 500, [toolPart("write", "running")]),
+    ]
+    await expect(toolHook({ sessionID: "ses_primary", tool: "read" })).rejects.toThrow(
+      /Context cap \(9500\/5000/
+    )
+    expect(state.prompts).toHaveLength(1)
+    expect(state.synthetics).toHaveLength(0)
+
+    // settled mutation but an unfinished todo list → not a boundary
+    const { state: s2, hooks: h2, cleanup: c2 } = await startPlugin()
+    s2.messages = [
+      assistantWithParts(9_000, 500, [
+        toolPart("write", "completed"),
+        toolPart("todowrite", "completed", ["completed", "in_progress"]),
+      ]),
+    ]
+    await expect(h2["tool.execute.before"]!({ sessionID: "ses_primary", tool: "read" })).rejects.toThrow(
+      /Context cap \(9500\/5000/
+    )
+
+    // all todos completed → boundary again, deferral applies
+    s2.messages = [
+      assistantWithParts(9_000, 500, [
+        toolPart("write", "completed"),
+        toolPart("todowrite", "completed", ["completed", "completed"]),
+      ]),
+    ]
+    await expect(h2["tool.execute.before"]!({ sessionID: "ses_primary", tool: "read" })).resolves.toBeUndefined()
+    expect(s2.prompts).toHaveLength(1) // no additional handoff prompt
+
+    await cleanup?.()
+    await c2?.()
+  })
+
+  it("deferral budget is bounded: after maxDeferrals the gate forces even read-only calls", async () => {
+    // repo config: maxDeferrals 2 via the session's handoff.json
+    const repo3 = join(sandbox, "repo3")
+    mkdirSync(join(repo3, ".opencode"), { recursive: true })
+    writeFileSync(
+      join(repo3, ".opencode", "handoff.json"),
+      JSON.stringify({
+        primaryLimit: 5_000,
+        graceTokens: 0,
+        maxDeferrals: 2,
+        autoRollover: true,
+        saveArtifactsDir: ".opencode/handoffs",
+      })
+    )
+    const { state, hooks, cleanup } = await startPlugin([], { ses_budget: repo3 })
+    const toolHook = hooks["tool.execute.before"]!
+
+    // graceTokens 0 → hard gate is exactly 5000; occupancy 6000, safe boundary
+    state.messages = [assistantMessage(6_000, 0)]
+    await expect(toolHook({ sessionID: "ses_budget", tool: "read" })).resolves.toBeUndefined()
+    await expect(toolHook({ sessionID: "ses_budget", tool: "read" })).resolves.toBeUndefined()
+    expect(state.synthetics).toHaveLength(1) // one deferral note
+
+    // 3rd deferral exceeds maxDeferrals=2 → forced handoff
+    await expect(toolHook({ sessionID: "ses_budget", tool: "read" })).rejects.toThrow(
+      /Context cap \(6000\/5000/
+    )
+    expect(state.prompts).toHaveLength(1)
+
+    await cleanup?.()
+  })
+
+  it("subagent gate ignores the grace band (original single-threshold behavior)", async () => {
+    const { state, hooks, cleanup } = await startPlugin([
+      { type: "session.created", data: { sessionID: "ses_sub", parentID: "ses_primary" } },
+    ])
+    const toolHook = hooks["tool.execute.before"]!
+
+    // subagentLimit 2000; 2500 tokens is well within primary's grace band
+    // but the subagent path must fire immediately with the summary prompt
+    state.messages = [assistantMessage(2_500, 0)]
+    await expect(toolHook({ sessionID: "ses_sub", tool: "read" })).rejects.toThrow(/2500\/2000/)
+    expect(state.prompts[0].text).toContain("SUBAGENT CONTEXT LIMIT REACHED (2500/2000 tokens)")
+    expect(state.synthetics).toHaveLength(0) // no grace/deferral nudges for subagents
 
     await cleanup?.()
   })

@@ -59,20 +59,26 @@ Settings are read from `.opencode/handoff.json` in the project, or
   "primaryLimit": 115000,
   "subagentLimit": 16000,
   "autoRollover": true,
-  "saveArtifactsDir": ".opencode/handoffs"
+  "saveArtifactsDir": ".opencode/handoffs",
+  "graceTokens": 4000,
+  "deferAtSafeBoundary": true,
+  "maxDeferrals": 6
 }
 ```
 
 | Option            | Default             | Description                                        |
 | ----------------- | ------------------- | -------------------------------------------------- |
-| `primaryLimit`    | `24000`             | Token budget for primary sessions                  |
+| `primaryLimit`    | `24000`             | Soft token budget for primary sessions             |
 | `subagentLimit`   | `16000`             | Token budget for subagent sessions                 |
 | `autoRollover`    | `true`              | Spawn + seed the resumed session automatically     |
 | `saveArtifactsDir`| `.opencode/handoffs`| Directory for saved handoff artifacts (per repo)   |
+| `graceTokens`     | `4000`              | Extra headroom between the soft limit and the hard gate; inside the band a warning nudges the model to wrap up without blocking tools. `0` restores fail-fast behavior |
+| `deferAtSafeBoundary` | `true`          | At the hard gate, defer the handoff while the session sits at a safe boundary (no in-flight mutation, todo list empty or all-completed); forced at the next state-changing call |
+| `maxDeferrals`    | `6`                 | How many safe-boundary deferrals are allowed before the handoff is forced anyway |
 
 Precedence (lowest to highest): built-in defaults → plugin options → environment variables
-(`OPENCODE_PRIMARY_LIMIT`, `OPENCODE_SUBAGENT_LIMIT`) → config file → runtime overrides set via
-`/handoff-limit`.
+(`OPENCODE_PRIMARY_LIMIT`, `OPENCODE_SUBAGENT_LIMIT`, `OPENCODE_GRACE_TOKENS`) → config file →
+runtime overrides set via `/handoff-limit`.
 
 ## Commands
 

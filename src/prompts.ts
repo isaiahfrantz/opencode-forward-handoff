@@ -38,3 +38,28 @@ export const buildResumePrompt = (artifact: string) =>
     artifact,
   ].join("\n")
 
+/**
+ * Soft-limit nudge: injected (once) while occupancy sits between the soft
+ * limit and the hard gate. Visible synthetic message — the agent keeps
+ * working but should start winding down.
+ */
+export const buildGraceWarning = (current: number, softLimit: number, hardLimit: number) =>
+  [
+    `[handoff] CONTEXT APPROACHING LIMIT (${current}/${hardLimit} tokens; soft limit ${softLimit}).`,
+    "Start wrapping up: finish the unit of work you are inside, avoid starting new multi-step explorations,",
+    "and prefer targeted reads over broad ones. A forced context handoff triggers at the hard limit.",
+  ].join(" ")
+
+/**
+ * Injected when the hard gate defers the handoff because the session is at a
+ * safe boundary (no pending modifications / todo list complete). The agent may
+ * keep going; the handoff is forced at the next state-changing step.
+ */
+export const buildDeferralNote = (current: number, hardLimit: number) =>
+  [
+    `[handoff] CONTEXT LIMIT REACHED (${current}/${hardLimit} tokens), handoff deferred: the session is at a ` +
+      "safe boundary (no pending modifications, all tracked todos completed). Only read-only or finalizing steps " +
+      "are allowed — the forced handoff summary will be requested at the next state-changing step.",
+  ].join(" ")
+
+

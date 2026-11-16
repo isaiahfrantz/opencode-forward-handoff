@@ -8,6 +8,7 @@ import { loadConfig, PLUGIN_DEFAULTS, runtimeOverrides } from "../src/config.js"
 const realHome = process.env.HOME
 const realPrimary = process.env.OPENCODE_PRIMARY_LIMIT
 const realSubagent = process.env.OPENCODE_SUBAGENT_LIMIT
+const realGrace = process.env.OPENCODE_GRACE_TOKENS
 
 let sandbox: string
 
@@ -16,8 +17,10 @@ beforeEach(() => {
   process.env.HOME = join(sandbox, "home") // does not exist -> no user config
   delete process.env.OPENCODE_PRIMARY_LIMIT
   delete process.env.OPENCODE_SUBAGENT_LIMIT
+  delete process.env.OPENCODE_GRACE_TOKENS
   delete runtimeOverrides.primaryLimit
   delete runtimeOverrides.subagentLimit
+  delete runtimeOverrides.graceTokens
 })
 
 afterEach(() => {
@@ -27,8 +30,11 @@ afterEach(() => {
   else process.env.OPENCODE_PRIMARY_LIMIT = realPrimary
   if (realSubagent === undefined) delete process.env.OPENCODE_SUBAGENT_LIMIT
   else process.env.OPENCODE_SUBAGENT_LIMIT = realSubagent
+  if (realGrace === undefined) delete process.env.OPENCODE_GRACE_TOKENS
+  else process.env.OPENCODE_GRACE_TOKENS = realGrace
   delete runtimeOverrides.primaryLimit
   delete runtimeOverrides.subagentLimit
+  delete runtimeOverrides.graceTokens
 })
 
 describe("loadConfig", () => {
@@ -84,5 +90,30 @@ describe("loadConfig", () => {
     writeFileSync(join(sandbox, ".opencode", "handoff.json"), "{ not json")
     const cfg = loadConfig(sandbox, { primaryLimit: 30_000 })
     expect(cfg.primaryLimit).toBe(30_000)
+  })
+
+  it("OPENCODE_GRACE_TOKENS env overrides the default grace window", () => {
+    process.env.OPENCODE_GRACE_TOKENS = "1500"
+    const cfg = loadConfig(sandbox)
+    expect(cfg.graceTokens).toBe(1_500)
+  })
+
+  it("graceTokens: 0 is honored (fail-fast), not replaced by the default", () => {
+    mkdirSync(join(sandbox, ".opencode"), { recursive: true })
+    writeFileSync(join(sandbox, ".opencode", "handoff.json"), JSON.stringify({ graceTokens: 0 }))
+    const cfg = loadConfig(sandbox)
+    expect(cfg.graceTokens).toBe(0)
+    expect(cfg.deferAtSafeBoundary).toBe(PLUGIN_DEFAULTS.deferAtSafeBoundary)
+  })
+
+  it("config file can disable deferral and cap the deferral budget", () => {
+    mkdirSync(join(sandbox, ".opencode"), { recursive: true })
+    writeFileSync(
+      join(sandbox, ".opencode", "handoff.json"),
+      JSON.stringify({ deferAtSafeBoundary: false, maxDeferrals: 2 })
+    )
+    const cfg = loadConfig(sandbox)
+    expect(cfg.deferAtSafeBoundary).toBe(false)
+    expect(cfg.maxDeferrals).toBe(2)
   })
 })

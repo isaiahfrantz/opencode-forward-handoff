@@ -44,9 +44,11 @@ occupancy quadratically.
 
 Precedence in `loadConfig()` (`src/config.ts`), lowest → highest:
 
-1. `PLUGIN_DEFAULTS` — `primaryLimit: 24000`, `subagentLimit: 16000`, `autoRollover: true`, `saveArtifactsDir: ".opencode/handoffs"`
+1. `PLUGIN_DEFAULTS` — `primaryLimit: 24000`, `subagentLimit: 16000`, `autoRollover: true`,
+   `saveArtifactsDir: ".opencode/handoffs"`, `graceTokens: 4000`, `deferAtSafeBoundary: true`,
+   `maxDeferrals: 6`
 2. Plugin options passed via `opencode.json` (`{ "package": "...", "options": {...} }`)
-3. Env vars `OPENCODE_PRIMARY_LIMIT` / `OPENCODE_SUBAGENT_LIMIT`
+3. Env vars `OPENCODE_PRIMARY_LIMIT` / `OPENCODE_SUBAGENT_LIMIT` / `OPENCODE_GRACE_TOKENS`
 4. First JSON file found: `<worktree>/.opencode/handoff.json`, then `~/.config/opencode/handoff.json`
 5. `runtimeOverrides` — set by `/handoff-limit`; **in-memory only, never persisted**, lost on server restart
 
@@ -58,11 +60,17 @@ the next tool call (except `runtimeOverrides`, which only `/handoff-limit reset`
 1. **Hierarchy tracking** — a `ctx.event.subscribe()` loop records
    `isSubagent[sessionID] = Boolean(parentID)` on `session.created`; cleanup on
    `session.deleted`.
-2. **Gate** — `ctx.tool.hook("execute.before")` computes occupancy. Below limit → allow.
-   At/over limit → first time, inject the generator prompt (`buildGeneratorPrompt`) into
-   the session (or the subagent summary instruction), mark `handoffPending`, then
-   **throw** to block the tool call. Throwing is intentional: it's the only way to
-   refuse a tool call.
+2. **Gate** — `ctx.tool.hook("execute.before")` computes occupancy in three bands (primary
+   sessions): below `primaryLimit` → allow (and reset `graceWarned`/`deferralCount`);
+   within `[primaryLimit, primaryLimit + graceTokens)` → inject the grace warning
+   (`buildGraceWarning`) once, still allow; at/above the hard limit → force handoff unless
+   `deferAtSafeBoundary` allows a deferral: the tool call is read-only (`MUTATING_TOOL` regex),
+   no mutation is in flight (`hasInFlightMutation`), the todo list is empty or fully completed
+   (`todosAtBoundary`), and `maxDeferrals` isn't exhausted. Forcing injects the generator prompt
+   (`buildGeneratorPrompt`), marks `handoffPending`, then **throws** to block the tool call —
+   throwing is the only way to refuse a tool call. The first deferral injects `buildDeferralNote`
+   so the model knows it has limited runway. Subagent sessions keep the single-threshold
+   behavior (no grace/deferral).
 3. **Rollover** — `ctx.session.hook("experimental.idle")` fires when the pending session
    goes idle. It looks for `# SESSION HANDOFF ARTIFACT` in the last assistant message's
    `text` content parts (V2 message schema: `m.type === "assistant"`, `m.content[]`),
@@ -82,6 +90,8 @@ the next tool call (except `runtimeOverrides`, which only `/handoff-limit reset`
   contract between the generator prompt and the idle-hook detector — keep both in sync.
 - `buildResumePrompt(artifact)` — seeds new sessions; instructs scoped reads, trusting
   the artifact, and executing Section 5 immediately.
+- `buildGraceWarning` / `buildDeferralNote` — synthetic nudges for the grace band and the
+  first safe-boundary deferral respectively; injected once per session/band, never block.
 
 ## Commands
 

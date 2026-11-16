@@ -1,8 +1,8 @@
 import { Plugin } from "@opencode/plugin"
-import { existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { type HandoffConfig, loadConfig, runtimeOverrides } from "./config.js"
-import { buildGeneratorPrompt, buildResumePrompt } from "./prompts.js"
+import { buildDeferralNote, buildGeneratorPrompt, buildGraceWarning, buildResumePrompt } from "./prompts.js"
 
 // Approximate context occupancy from the latest assistant message's prompt-side
 // token usage (input + cache read), matching what the model actually sees.
@@ -26,6 +26,66 @@ function occupancyFromMessages(messages: readonly unknown[]): number {
   return max
 }
 
+// Tool names that change state (files, environment). Anything not matched here
+// is treated as read-only for deferral purposes — conservative on both sides:
+// bash is classified as mutating, unknown custom tools are read-only.
+const MUTATING_TOOL = /^(write|edit|apply_patch|patch|multiedit|notebook.*edit|bash|shell|task|todowrite|todo_write)$/i
+
+// V2 AssistantTool content part (see @opencode/schema session-message):
+// { type: "tool", name, state: { status: streaming|running|completed|error, input } }
+interface ToolPartLike {
+  type?: string
+  name?: string
+  state?: {
+    status?: string
+    input?: { todos?: Array<{ status?: string }> }
+  }
+}
+
+interface MessageLike {
+  type?: string
+  content?: ToolPartLike[]
+}
+
+// A mutation is "in flight" when the assistant message being generated still
+// has a non-settled mutating tool part (parallel calls in one turn: a write
+// is still running while the gate sees the next call).
+function hasInFlightMutation(messages: readonly unknown[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as MessageLike | undefined
+    if (m?.type !== "assistant") continue
+    for (const part of m.content ?? []) {
+      const status = part.state?.status
+      if (
+        part.type === "tool" &&
+        (status === "streaming" || status === "running") &&
+        MUTATING_TOOL.test(part.name ?? "")
+      ) {
+        return true
+      }
+    }
+    break
+  }
+  return false
+}
+
+// Safe boundary from the agent's own todo list: the most recent todo mutation
+// (tool name containing "todo", e.g. todowrite) must show every item
+// completed. No todo list at all counts as a boundary ("empty").
+function todosAtBoundary(messages: readonly unknown[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as MessageLike | undefined
+    if (m?.type !== "assistant") continue
+    for (const part of m.content ?? []) {
+      if (part.type !== "tool" || !/todo/i.test(part.name ?? "")) continue
+      const todos = part.state?.input?.todos
+      if (todos && todos.length > 0) return todos.every((t) => t.status === "completed")
+    }
+    break
+  }
+  return true
+}
+
 export default Plugin.define({
   id: "forward-handoff",
   async setup(ctx) {
@@ -33,6 +93,8 @@ export default Plugin.define({
     const handoffPending = new Set<string>()
     const rolloverCompleted = new Set<string>()
     const sessionWorktree = new Map<string, string>()
+    const graceWarned = new Set<string>()
+    const deferralCount = new Map<string, number>()
     const abortController = new AbortController()
 
     const getServerWorktree = () =>
@@ -95,6 +157,8 @@ export default Plugin.define({
           if (firstArg === "reset") {
             delete runtimeOverrides.primaryLimit
             delete runtimeOverrides.subagentLimit
+            graceWarned.delete(input.sessionID)
+            deferralCount.delete(input.sessionID)
             const fresh = loadConfig(worktree, pluginOptions)
             await ctx.session.synthetic({
               sessionID: input.sessionID,
@@ -158,6 +222,8 @@ export default Plugin.define({
             handoffPending.delete(id)
             rolloverCompleted.delete(id)
             sessionWorktree.delete(id)
+            graceWarned.delete(id)
+            deferralCount.delete(id)
           }
         }
       } catch {
@@ -217,34 +283,75 @@ export default Plugin.define({
       }
     })
 
-    // 4. Block tools when active session reaches its configured token limit
+    // 4. Gate tool execution on the session's context budget.
+    //    Primary sessions use three bands:
+    //      < softLimit              -> allow
+    //      [softLimit, hardLimit)   -> grace band: warn once, keep working
+    //      >= hardLimit             -> hard gate: force handoff, unless the
+    //                                  session sits at a safe boundary (no
+    //                                  in-flight mutation, todos all done) and
+    //                                  the call is read-only → defer (bounded)
+    //    Subagent sessions keep the original single-threshold behaviour.
     await ctx.tool.hook("execute.before", async (input) => {
       const worktree = await resolveWorktree(input.sessionID)
       const cfg = loadConfig(worktree, pluginOptions)
-      if (process.env.OPENCODE_HANDOFF_DEBUG) {
-        console.error(
-          `[handoff-debug] session=${input.sessionID} worktree=${worktree} ` +
-            `limit=${cfg.primaryLimit} scratch=${existsSync(join(worktree, ".opencode", "handoff.json"))} ` +
-            `cached_dir=${sessionWorktree.get(input.sessionID) ?? "<none>"}`
-        )
-      }
       const ctxMsgs = await ctx.session.context({ sessionID: input.sessionID })
       const currentTokens = occupancyFromMessages(ctxMsgs)
       const subagent = isSubagent.get(input.sessionID) ?? false
-      const limit = subagent ? cfg.subagentLimit : cfg.primaryLimit
+      const softLimit = subagent ? cfg.subagentLimit : cfg.primaryLimit
+      const hardLimit = subagent ? cfg.subagentLimit : cfg.primaryLimit + cfg.graceTokens
 
       if (process.env.OPENCODE_HANDOFF_DEBUG) {
         console.error(
-          `[handoff-debug]   occupancy=${currentTokens} limit=${limit} gate=${currentTokens >= limit ? "FIRE" : "pass"} msgcount=${ctxMsgs.length}`
+          `[handoff-debug] session=${input.sessionID} tool=${input.tool} occupancy=${currentTokens} ` +
+            `soft=${softLimit} hard=${hardLimit} gate=${
+              currentTokens < softLimit ? "pass" : currentTokens < hardLimit ? "grace" : "FIRE"
+            } msgcount=${ctxMsgs.length}`
         )
       }
-      if (currentTokens < limit) return
+
+      if (currentTokens < softLimit) {
+        graceWarned.delete(input.sessionID)
+        deferralCount.delete(input.sessionID)
+        return
+      }
+
+      // Grace band: nudge the model to wind down but do not block yet, so the
+      // unit of work in progress can finish cleanly instead of being cut off.
+      if (!subagent && currentTokens < hardLimit) {
+        if (!graceWarned.has(input.sessionID)) {
+          graceWarned.add(input.sessionID)
+          await ctx.session.synthetic({
+            sessionID: input.sessionID,
+            resume: false,
+            text: buildGraceWarning(currentTokens, softLimit, hardLimit),
+          })
+        }
+        return
+      }
+
+      // Hard gate. Optionally defer while the session is at a safe boundary.
+      if (!subagent && cfg.deferAtSafeBoundary && !MUTATING_TOOL.test(input.tool)) {
+        const boundary = !hasInFlightMutation(ctxMsgs) && todosAtBoundary(ctxMsgs)
+        const deferred = deferralCount.get(input.sessionID) ?? 0
+        if (boundary && deferred < cfg.maxDeferrals) {
+          deferralCount.set(input.sessionID, deferred + 1)
+          if (deferred === 0) {
+            await ctx.session.synthetic({
+              sessionID: input.sessionID,
+              resume: false,
+              text: buildDeferralNote(currentTokens, hardLimit),
+            })
+          }
+          return
+        }
+      }
 
       if (!handoffPending.has(input.sessionID)) {
         handoffPending.add(input.sessionID)
         const promptText = subagent
-          ? `SUBAGENT CONTEXT LIMIT REACHED (${currentTokens}/${limit} tokens). Halt all tool calls immediately and return a concise summary (<400 tokens) of verified changes, failed attempts, and remaining steps to the parent agent.`
-          : buildGeneratorPrompt(currentTokens, limit)
+          ? `SUBAGENT CONTEXT LIMIT REACHED (${currentTokens}/${softLimit} tokens). Halt all tool calls immediately and return a concise summary (<400 tokens) of verified changes, failed attempts, and remaining steps to the parent agent.`
+          : buildGeneratorPrompt(currentTokens, softLimit)
 
         await ctx.session.prompt({
           sessionID: input.sessionID,
@@ -253,7 +360,7 @@ export default Plugin.define({
       }
 
       throw new Error(
-        `Context cap (${currentTokens}/${limit} tokens) reached. Tool "${input.tool}" blocked—emit your handoff summary now.`
+        `Context cap (${currentTokens}/${softLimit} tokens) reached. Tool "${input.tool}" blocked—emit your handoff summary now.`
       )
     })
 
