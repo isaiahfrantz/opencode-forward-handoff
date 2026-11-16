@@ -56,10 +56,15 @@ const fmt = (n: number, d = 0) =>
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
 
 // display order; sections show only the arms present in their rows
-// ("with" = original pre-grace plugin, "updated" = grace-window plugin; both
-// are plugin-enabled arms compared against "without")
-const ARMS = ["with", "without", "updated"] as const
-const ARM_COLOR: Record<string, string> = { with: "#2f81f7", without: "#8b949e", updated: "#3fb950" }
+// ("with" = original pre-grace plugin, "updated" = grace-window plugin,
+// "subfix" = sub-agent performance commit; all plugin-enabled vs "without")
+const ARMS = ["with", "without", "updated", "subfix"] as const
+const ARM_COLOR: Record<string, string> = {
+  with: "#2f81f7",
+  without: "#8b949e",
+  updated: "#3fb950",
+  subfix: "#a371f7",
+}
 
 type Stats = {
   reps: number
@@ -202,6 +207,8 @@ files.forEach((file, idx) => {
       ["with", "without"],
       ["updated", "without"],
       ["updated", "with"],
+      ["subfix", "without"],
+      ["subfix", "updated"],
     ]
     for (const [a, b] of pairs) {
       const x = st[a], y = st[b]
