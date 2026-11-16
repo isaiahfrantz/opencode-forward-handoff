@@ -10,6 +10,13 @@
  *         prints JSON aggregates over all sessions created in dir after since:
  *         summed tokens, peak_occupancy (last-message metric, as the plugin gate
  *         sees it), handoffs (Resumed Handoff children), per-session breakdown
+ *   active --db <path> --dir <scratch-dir> --since <ms> [--cap 300000]
+ *         prints JSON {span_ms, active_ms, dead_ms, largest_gap_ms} derived from
+ *         the merged message timeline of all sessions in dir. Inter-message gaps
+ *         above --cap (default 5 min) are treated as dead time (machine suspend,
+ *         dead connections) and excluded from active_ms. /proc/uptime and
+ *         date +%s both keep counting through S3 suspend, so wall clocks
+ *         measured around a rep overstate work time when the box sleeps.
  *
  * The server keeps the DB in WAL mode; we copy db+wal+shm to a temp dir and
  * read the copy so concurrent writers never block or corrupt our snapshot.
@@ -129,6 +136,33 @@ if (cmd === "idle") {
         tokens_billed: (r.tokens_input ?? 0) + (r.tokens_cache_read ?? 0) + (r.tokens_output ?? 0),
       })) as Row[],
     })
+  )
+} else if (cmd === "active") {
+  const db = openSnapshot(arg("db"))
+  const cap = Number(arg("cap") || 300000)
+  const rows = db
+    .query(
+      `select id from session_v2 where directory = ?1 and time_created >= ?2`
+    )
+    .all(arg("dir"), Number(arg("since"))) as Array<{ id: string }>
+  const times: number[] = []
+  for (const r of rows) {
+    const msgs = db
+      .query(`select time_created from session_message where session_id = ?1`)
+      .all(r.id) as Array<{ time_created: number }>
+    for (const m of msgs) times.push(m.time_created)
+  }
+  times.sort((a, b) => a - b)
+  let active = 0
+  let largest = 0
+  for (let i = 1; i < times.length; i++) {
+    const gap = times[i] - times[i - 1]
+    if (gap > largest) largest = gap
+    active += Math.min(gap, cap)
+  }
+  const span = times.length ? times[times.length - 1] - times[0] : 0
+  console.log(
+    JSON.stringify({ span_ms: span, active_ms: active, dead_ms: span - active, largest_gap_ms: largest })
   )
 } else {
   console.error(`unknown subcommand: ${cmd}`)

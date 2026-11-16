@@ -181,19 +181,27 @@ run_rep() { # arm task rep
   local metrics
   metrics=$(bun "$BENCH_DIR/metrics.ts" agg --db "${SERVER_DATA[$arm]}/opencode/opencode.db" \
     --dir "$scratch" --since "$since_ms" 2>/dev/null)
+  # wall clocks keep running through S3 suspend, which has corrupted reps before
+  # (a 4h sleep inflated one rep to 14,269s). Derive suspension-corrected active
+  # time from the message timeline; fall back to raw wall if the query fails.
+  local active_json active_ms
+  active_json=$(bun "$BENCH_DIR/metrics.ts" active --db "${SERVER_DATA[$arm]}/opencode/opencode.db" \
+    --dir "$scratch" --since "$since_ms" 2>/dev/null)
+  active_ms=$(echo "$active_json" | jq -r '.active_ms // empty' 2>/dev/null)
+  [[ -z "$active_ms" ]] && active_ms=$((t1 - t0))
   local artifacts=0
   [[ -d "$scratch/.opencode/handoffs" ]] && artifacts=$(find "$scratch/.opencode/handoffs" -name 'handoff-*.md' | wc -l)
 
   echo "$metrics" | jq -c \
     --arg arm "$arm" --arg task "$task" --arg rep "$rep" \
-    --arg root "$root" --argjson wall_ms "$((t1 - t0))" \
+    --arg root "$root" --argjson wall_ms "$active_ms" --argjson wall_raw_ms "$((t1 - t0))" \
     --argjson pass "$pass" --argjson hops "$hops" --argjson nudges "$nudges" \
     --argjson rejects "$((rejects1 - rejects0))" --argjson artifacts "$artifacts" \
     '{arm:$arm, task:$task, rep:($rep|tonumber), root_session:$root, pass:($pass==1),
       handoff_hops:$hops, nudges:$nudges, compaction_rejects:$rejects, artifacts:$artifacts,
-      wall_ms:$wall_ms} + .' \
+      wall_ms:$wall_ms, wall_raw_ms:$wall_raw_ms} + .' \
     >> "$RUNS_DIR/results.jsonl"
-  echo "== $arm/$name: pass=$pass hops=$hops nudges=$nudges rejects=$((rejects1 - rejects0)) artifacts=$artifacts wall=$(( (t1-t0)/1000 ))s"
+  echo "== $arm/$name: pass=$pass hops=$hops nudges=$nudges rejects=$((rejects1 - rejects0)) artifacts=$artifacts wall=$(( active_ms/1000 ))s (raw $(( (t1-t0)/1000 ))s)"
 }
 
 for arm in $ARMS; do

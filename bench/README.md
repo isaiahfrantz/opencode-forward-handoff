@@ -34,6 +34,14 @@ session.
    compaction rejects, wall time, per-session and total billed tokens
    (`input + cache.read + output`), peak occupancy.
 
+Wall time is **suspend-corrected**: `date +%s` and `/proc/uptime` both keep
+counting through S3 sleep, and a mid-run suspend once inflated a rep to 4 wall
+hours. The recorded `wall_ms` is `active_ms` from `metrics.ts active` — the
+merged message timeline of the rep's sessions with inter-message gaps over
+5 min excluded as dead time. The raw wall clock is kept as `wall_raw_ms`.
+Prefer launching long benchmarks under
+`systemd-inhibit --what=idle:sleep bash bench/run.sh …`.
+
 ## Tasks
 
 - `tasks/warehouse-cli` — small fix task (peaks ~11k occupancy). Expected to
@@ -54,8 +62,9 @@ Each task dir contains `repo/` (the scratch starting point), `PROMPT.md`, and
 # calibration (1 rep, sanity-check plumbing)
 bash bench/run.sh --arm both --tasks warehouse-cli --reps 1 --limit 24000
 
-# full benchmark
-bash bench/run.sh --arm both --reps 5 --limit 24000 --runs-dir /tmp/opencode/bench/runs-full
+# full benchmark (inhibit suspend so reps aren't inflated by sleep)
+systemd-inhibit --what=idle:sleep --who=bench --why "benchmark run" \
+  bash bench/run.sh --arm both --reps 5 --limit 24000 --runs-dir /tmp/opencode/bench/runs-full
 
 # report
 bun bench/report.ts /tmp/opencode/bench/runs-full/results.jsonl
@@ -70,8 +79,9 @@ resolved as `$OPENCODE_BIN` → `bench/bin/opencode` (untracked) → `opencode`.
 - `metrics.ts` — reads a snapshot copy of the arm's `opencode.db`
   (`bun:sqlite`). Subcommands: `idle <db> <session>` (has it gone idle?),
   `child <db> <dir> <since-id>` (newest `Resumed Handoff` session under a
-  scratch dir), `agg <db> <ids…>` (token/occupancy aggregation). Used by
-  `run.sh`; also useful ad hoc.
+  scratch dir), `agg <db> <ids…>` (token/occupancy aggregation),
+  `active <db> <dir> <since-ms>` (suspend-corrected active time from the
+  message timeline). Used by `run.sh`; also useful ad hoc.
 - `report.ts` — aggregates `results.jsonl` into a per-task + overall arm
   comparison table (success %, wall seconds, billed tokens, hops, nudges,
   rejects).
