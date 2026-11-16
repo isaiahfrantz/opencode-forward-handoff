@@ -41,7 +41,13 @@ PORT_WITHOUT=17802
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --arm) ARMS="$2"; shift 2 ;;
+    --arm)
+      case "$2" in
+        both) ARMS="with without" ;;
+        with|without) ARMS="$2" ;;
+        *) echo "unknown arm: $2 (use with|without|both)" >&2; exit 2 ;;
+      esac
+      shift 2 ;;
     --tasks) TASKS="$2"; shift 2 ;;
     --reps) REPS="$2"; shift 2 ;;
     --nudges) NUDGES="$2"; shift 2 ;;
@@ -59,6 +65,10 @@ declare -A SERVER_PID SERVER_PORT SERVER_LOG SERVER_DATA
 
 start_server() { # arm -> sets SERVER_PID[arm], SERVER_PORT[arm], etc.
   local arm=$1 port
+  if [[ ! -d "$BENCH_DIR/arm-config/$arm" ]]; then
+    echo "invalid arm '$arm': no bench/arm-config/$arm" >&2
+    return 2
+  fi
   if [[ $arm == with ]]; then port=$PORT_WITH; else port=$PORT_WITHOUT; fi
   local data="$RUNS_DIR/$arm/data"
   local log="$RUNS_DIR/$arm/serve.log"
