@@ -187,3 +187,10 @@ Reading:
   do. Both arms hit 0 rejects.
 - Honest caveat: the `with`-arm mean is dominated by r4 (743k); medians are
   closer (with 448k vs without 376k) but still favor `without`.
+- **Scope caveat:** "the plugin doesn't help multi-agent" is partly a property
+  of *this task's shard sizes*. Shards were deliberately small and
+  zero-cross-dependency, so sub-agent peaks (11k–15k) sat well under the 16k
+  `subagentLimit` — the gate's sub-agent path was never exercised. A task with
+  large exploratory shards (auditing a sprawling legacy module, say) could push
+  sub-agents past their limit, where the quiet-complete path and parent-side
+  remediation would decide the outcome. See `tasks/legacy-audit` below.

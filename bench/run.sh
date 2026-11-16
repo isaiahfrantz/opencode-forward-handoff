@@ -12,7 +12,11 @@
 #     "continue" nudges to the current (possibly handoff'd) session.
 #
 # Usage: bench/run.sh [--arm with|without|both] [--tasks "t1 t2"] [--reps N]
-#                     [--nudges N] [--limit 28000] [--runs-dir DIR]
+#                     [--nudges N] [--limit 28000] [--sublimit 16000]
+#                     [--runs-dir DIR]
+# --sublimit pins subagentLimit in the with-arm's per-repo handoff.json; without
+# it, the plugin default (16000) applies (sub-agent handoffs happen quietly and
+# the parent handles rollover).
 set -uo pipefail
 
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +36,7 @@ TASKS="pricing-engine warehouse-cli"
 REPS=1
 NUDGES=2
 LIMIT=28000
+SUBLIMIT=""
 MODEL="gufo/qwen3.8-flash-next-v3.1"
 TURN_TIMEOUT=1500     # seconds cap per agent turn
 IDLE_TIMEOUT=1500     # seconds to wait for a session to go idle
@@ -52,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --reps) REPS="$2"; shift 2 ;;
     --nudges) NUDGES="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
+    --sublimit) SUBLIMIT="$2"; shift 2 ;;
     --runs-dir) RUNS_DIR="$2"; shift 2 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
@@ -139,7 +145,11 @@ run_rep() { # arm task rep
 
   if [[ $arm == with ]]; then
     mkdir -p "$scratch/.opencode"
-    printf '{ "primaryLimit": %d }\n' "$LIMIT" > "$scratch/.opencode/handoff.json"
+    if [[ -n "$SUBLIMIT" ]]; then
+      printf '{ "primaryLimit": %d, "subagentLimit": %d }\n' "$LIMIT" "$SUBLIMIT" > "$scratch/.opencode/handoff.json"
+    else
+      printf '{ "primaryLimit": %d }\n' "$LIMIT" > "$scratch/.opencode/handoff.json"
+    fi
   fi
 
   local prompt_file="$repdir/prompt.txt"
