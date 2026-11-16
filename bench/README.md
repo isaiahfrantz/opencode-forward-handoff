@@ -1,14 +1,22 @@
 # Benchmark: harness with vs. without the handoff plugin
 
-A/B benchmark measuring what `opencode-forward-handoff` costs and what it buys
-when running the same coding tasks through the OpenCode CLI.
+A/B/A benchmark measuring what `opencode-forward-handoff` costs and what it
+buys when running the same coding tasks through the OpenCode CLI, comparing
+the original gate against the updated (grace window + deferral) version.
 
 ## Arms
 
 | arm | plugin | notes |
 |-----|--------|-------|
-| `with` | loaded from GitHub (pinned SHA in `arm-config/with/opencode/opencode.json`) | gets a hermetic `.opencode/handoff.json` (`primaryLimit` = `--limit`) written into each scratch task repo |
+| `with` | original, loaded from GitHub pinned to `7b12cd0` (`arm-config/with/opencode/opencode.json`) | fail-fast single threshold: at `primaryLimit` the tool call is blocked and a handoff forced immediately |
+| `updated` | grace window + safe-boundary deferral, pinned to `1057e49` (`arm-config/updated/opencode/opencode.json`) | warn-only band `primaryLimit`…`primaryLimit+graceTokens`; at the hard gate, read-only calls at a safe boundary defer up to 6× before forcing |
 | `without` | not configured at all | sessions run to completion (or provider-side rejection) in one context |
+
+Both plugin arms get a hermetic `.opencode/handoff.json` (`primaryLimit` =
+`--limit`, `subagentLimit` = `--sublimit`, default 16000) written into each
+scratch task repo. Pinning matters: the plugin loads from GitHub, so the two
+plugin arms run identical tasks/limits/models and differ *only* in gate
+behavior.
 
 Arms are fully isolated: each has its own `XDG_CONFIG_HOME`
 (`bench/arm-config/<arm>`), its own `XDG_DATA_HOME` (own `opencode.db`), and
@@ -20,8 +28,9 @@ session.
 ## How a run works (`run.sh`)
 
 1. Copy the task repo to a scratch dir **outside any git repo** (worktree
-   detection must not leak upward), `git init` it, and for the `with` arm write
-   `.opencode/handoff.json`.
+   detection must not leak upward), `git init` it, and for the plugin arms
+   (`with`, `updated`) write `.opencode/handoff.json` with the run's
+   `--limit`/`--sublimit`.
 2. Start (or reuse) the arm's `opencode serve`; run
    `opencode run --session …` with the task's `PROMPT.md` as the first message.
 3. After the turn goes idle, poll the arm's DB snapshot for a new
@@ -58,6 +67,13 @@ Prefer launching long benchmarks under
   the task tool, and `check.sh` (`bun test`) grades all four. Subagent
   sessions are capped by `subagentLimit` (default 16k) and complete quietly
   when hit; the parent session handles rollover.
+- `tasks/legacy-audit` — like module-triage but the four modules are
+  deliberately sprawling legacy code with long dependency chains, so shards
+  run 13–24k tokens and straddle the 16k `subagentLimit` (the quiet-complete
+  path actually executes). Specs in `docs/<module>-spec.md` are locked and
+  authoritative; a planted misleading `docs/NOTES.md` tests whether agents
+  trust it over the spec; each module has one planted regression discoverable
+  only by reading the spec and tracing with `tools/dump.ts`.
 
 Each task dir contains `repo/` (the scratch starting point), `PROMPT.md`, and
 `check.sh` (deterministic grader; fixes must be in source, not tests/expected).
@@ -68,17 +84,25 @@ Each task dir contains `repo/` (the scratch starting point), `PROMPT.md`, and
 # calibration (1 rep, sanity-check plumbing)
 bash bench/run.sh --arm both --tasks warehouse-cli --reps 1 --limit 24000
 
-# full benchmark (inhibit suspend so reps aren't inflated by sleep)
+# full three-arm benchmark (inhibit suspend so reps aren't inflated by sleep)
 systemd-inhibit --what=idle:sleep --who=bench --why "benchmark run" \
-  bash bench/run.sh --arm both --reps 5 --limit 24000 --runs-dir /tmp/opencode/bench/runs-full
+  bash bench/run.sh --arm with without updated --reps 5 --limit 24000 \
+  --sublimit 16000 --runs-dir /tmp/opencode/bench/runs-full
 
-# report
-bun bench/report.ts /tmp/opencode/bench/runs-full/results.jsonl
+# report (tables + ASCII + SVG, one section per input file)
+bun bench/charts.ts runs1.jsonl runs2.jsonl ... \
+  --labels "Single-agent,Sub-agent: module triage,Sub-agent: legacy audit" \
+  --svg-dir bench/charts --out REPORT-sections.md
 ```
 
-Flags: `--arm with|without|both`, `--tasks "t1 t2"`, `--reps N`, `--nudges N`,
-`--limit N` (with-arm `primaryLimit`), `--runs-dir DIR`. The CLI binary is
-resolved as `$OPENCODE_BIN` → `bench/bin/opencode` (untracked) → `opencode`.
+Flags: `--arm with|without|updated|both` (a token is `both` iff exactly the
+two original arms are listed, for DB/port/label reuse), `--tasks "t1 t2"`,
+`--reps N`, `--nudges N`, `--limit N` (plugin arms' `primaryLimit`),
+`--sublimit N` (plugin arms' `subagentLimit`, default 16000),
+`--runs-dir DIR`. The CLI binary is resolved as `$OPENCODE_BIN` →
+`bench/bin/opencode` (untracked) → `opencode`. Never run two runners against
+the same `--runs-dir` concurrently (they interleave rows and share per-rep
+dirs).
 
 ## Metrics tools
 
@@ -111,86 +135,25 @@ resolved as `$OPENCODE_BIN` → `bench/bin/opencode` (untracked) → `opencode`.
 - `--limit` is a *handoff threshold*, not the model context window. A useful
   benchmark limit is comfortably below the backend's hard prompt cap (~32k)
   so the gate fires before the provider rejects.
-- Debug logging: `run.sh` exports `OPENCODE_HANDOFF_DEBUG=1` on the `with`
-  arm server only; `[handoff-debug]` lines land in `<runs-dir>/with/serve.log`.
+- Debug logging: `run.sh` exports `OPENCODE_HANDOFF_DEBUG=1` on the plugin-arm
+  servers; `[handoff-debug]` lines land in `<runs-dir>/<arm>/serve.log` as
+  `gate=pass|grace|FIRE` with occupancy vs soft/hard limits (`grace` =
+  warn-only band, `FIRE` = hard gate crossed → forced handoff on the original
+  arm; on the updated arm a FIRE may be followed by deferrals instead).
 - Runs from earlier, pre-fix code may be kept aside (e.g.
   `results-pre-fix.jsonl.bak`); the gate-occupancy bug (always 0) invalidated
   all pre-`7b12cd0` `with`-arm rows.
 
-## Results (reps=5, limit=24000, backend hard cap ~32k)
+## Results
 
-```
-pricing-engine
-arm       reps  success  wall(s)  billed tok  hops  nudges  rejects
-with         5     100%    213.5     247,455   1.0     0.2     0.0
-without      5     100%    331.5     458,928   0.0     0.0     0.0
+See **[REPORT.md](REPORT.md)** — the full three-arm report: per-family tables
+with pairwise deltas, SVG/ASCII charts, gate-event evidence from the serve
+logs, and per-family analysis (single-agent, module-triage, legacy-audit;
+60 runs total, all arms pinned as described above).
 
-warehouse-cli
-arm       reps  success  wall(s)  billed tok  hops  nudges  rejects
-with         5     100%     39.3      62,248   0.0     0.0     0.0
-without      5     100%     42.6      78,385   0.0     0.0     0.0
-```
-
-Reading:
-
-- **Long task (pricing-engine):** the gate fired exactly once per `with` rep
-  (root peaked 25.6k–28.3k, child resumed at ~9k). Handoffs cut billed tokens
-  **46%** (247k vs 459k) and suspend-corrected wall time **36%**. In the
-  `without` arm, billed tokens track peak occupancy almost linearly: reps that
-  crept to 32.1k/32.8k peak (the backend's rejection zone) burned 673k–748k
-  tokens re-sending full context on every request, and also took 2–4× the
-  wall time of their lower-occupancy siblings.
-- **Short task (warehouse-cli):** peak occupancy stayed ~10–12k on both arms,
-  so the gate never fired and the plugin was a verified no-op; the small
-  between-arm deltas there are run-to-run noise, not plugin effect.
-- **Success rate was 100% on both arms** — these tasks were completable
-  within one context; the win is cost/time and rejection headroom, not
-  correctness. With a hard ~32k cap and longer tasks, the `without` arm's
-  32.8k peak rep shows it operating at the edge of outright provider
-  rejection (`rejects` counts observed compaction/rejection errors; zero
-  occurred, but two reps finished within ~600 tokens of the cap).
-- One `with` rep needed a nudge (model blocked once without emitting the
-  artifact, produced it after the follow-up) — the nudge mechanism recovered
-  it, final hop count unchanged.
-
-## Results — sub-agent task (module-triage, reps=5, limit=24000)
-
-4 parallel sub-agents per rep (task tool); `sub` columns split tokens by
-`session_v2.parent_id` (subagents have it, handoff children don't).
-
-```
-module-triage
-arm       reps  success  wall(s)  billed tok  hops  nudges  rejects
-with         5     100%    313.5     491,265   0.2     0.0     0.0
-without      5     100%    254.5     397,068   0.0     0.0     0.0
-
-arm       parent tok  sub tok  parent peak (max rep)  sub peak (max rep)
-with        225,738  265,527             26,480               14,603
-without     155,401  241,667             23,304               13,481
-```
-
-Reading:
-
-- **The plugin did not help here — it cost more.** Only one `with` rep fired a
-  handoff (r4: parent peaked 26,480 → 1 hop), and that rep burned 743k tokens
-  vs a 397k arm mean. Excluding r4, the `with` mean is still 428k vs 397k —
-  within run-to-run noise, but there is no token or wall-time win.
-- **Why the single-agent win doesn't transfer:** with 4 parallel sub-agents,
-  no context ever grows large enough to matter. Sub-agent peaks stayed at
-  11k–15k (each handles one small module) and parent peaks 13k–26k — the
-  parent only aggregates summaries, so the gate's target condition (one
-  session grinding toward the cap) rarely exists. The parent's own occupancy
-  growth in r4 was incidental, and the hop it triggered cost more (artifact +
-  fresh-context re-reading) than the high-occupancy requests it avoided.
-- **Multi-agent parallelism is itself the context-management strategy**: work
-  is sharded below any cap by construction, so a handoff gate has nothing to
-  do. Both arms hit 0 rejects.
-- Honest caveat: the `with`-arm mean is dominated by r4 (743k); medians are
-  closer (with 448k vs without 376k) but still favor `without`.
-- **Scope caveat:** "the plugin doesn't help multi-agent" is partly a property
-  of *this task's shard sizes*. Shards were deliberately small and
-  zero-cross-dependency, so sub-agent peaks (11k–15k) sat well under the 16k
-  `subagentLimit` — the gate's sub-agent path was never exercised. A task with
-  large exploratory shards (auditing a sprawling legacy module, say) could push
-  sub-agents past their limit, where the quiet-complete path and parent-side
-  remediation would decide the outcome. See `tasks/legacy-audit` below.
+Headline: the plugin is a large, replicated win on the one workload whose
+contexts actually threaten the backend cap (single-agent pricing-engine,
+−46% billed tokens original / −51% updated) and roughly neutral on sharded
+sub-agent work where the gate stays silent; the updated grace/deferral gate
+never increases cost over the original and removes its worst pathology (a
+743k-token mid-integration handoff).
