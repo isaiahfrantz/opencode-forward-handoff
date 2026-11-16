@@ -102,3 +102,39 @@ resolved as `$OPENCODE_BIN` → `bench/bin/opencode` (untracked) → `opencode`.
 - Runs from earlier, pre-fix code may be kept aside (e.g.
   `results-pre-fix.jsonl.bak`); the gate-occupancy bug (always 0) invalidated
   all pre-`7b12cd0` `with`-arm rows.
+
+## Results (reps=5, limit=24000, backend hard cap ~32k)
+
+```
+pricing-engine
+arm       reps  success  wall(s)  billed tok  hops  nudges  rejects
+with         5     100%    213.5     247,455   1.0     0.2     0.0
+without      5     100%    331.5     458,928   0.0     0.0     0.0
+
+warehouse-cli
+arm       reps  success  wall(s)  billed tok  hops  nudges  rejects
+with         5     100%     39.3      62,248   0.0     0.0     0.0
+without      5     100%     42.6      78,385   0.0     0.0     0.0
+```
+
+Reading:
+
+- **Long task (pricing-engine):** the gate fired exactly once per `with` rep
+  (root peaked 25.6k–28.3k, child resumed at ~9k). Handoffs cut billed tokens
+  **46%** (247k vs 459k) and suspend-corrected wall time **36%**. In the
+  `without` arm, billed tokens track peak occupancy almost linearly: reps that
+  crept to 32.1k/32.8k peak (the backend's rejection zone) burned 673k–748k
+  tokens re-sending full context on every request, and also took 2–4× the
+  wall time of their lower-occupancy siblings.
+- **Short task (warehouse-cli):** peak occupancy stayed ~10–12k on both arms,
+  so the gate never fired and the plugin was a verified no-op; the small
+  between-arm deltas there are run-to-run noise, not plugin effect.
+- **Success rate was 100% on both arms** — these tasks were completable
+  within one context; the win is cost/time and rejection headroom, not
+  correctness. With a hard ~32k cap and longer tasks, the `without` arm's
+  32.8k peak rep shows it operating at the edge of outright provider
+  rejection (`rejects` counts observed compaction/rejection errors; zero
+  occurred, but two reps finished within ~600 tokens of the cap).
+- One `with` rep needed a nudge (model blocked once without emitting the
+  artifact, produced it after the follow-up) — the nudge mechanism recovered
+  it, final hop count unchanged.

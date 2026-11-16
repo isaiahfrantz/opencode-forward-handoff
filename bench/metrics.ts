@@ -18,13 +18,14 @@
  *         date +%s both keep counting through S3 suspend, so wall clocks
  *         measured around a rep overstate work time when the box sleeps.
  *
- * The server keeps the DB in WAL mode; we copy db+wal+shm to a temp dir and
- * read the copy so concurrent writers never block or corrupt our snapshot.
+ * The server keeps the DB in WAL mode, where a second connection reads a
+ * consistent snapshot without blocking writers. Do NOT fall back to copying
+ * db+wal+shm: the copy raced with WAL checkpoints (db copied before a
+ * checkpoint + -wal copied after truncation = "old db, empty wal", silently
+ * dropping recent sessions — it zeroed one rep's metrics and truncated
+ * another to its handoff child only).
  */
 import { Database } from "bun:sqlite"
-import { cpSync, mkdtempSync } from "node:fs"
-import { join } from "node:path"
-import { tmpdir } from "node:os"
 
 function arg(name: string): string {
   const i = process.argv.indexOf(`--${name}`)
@@ -32,17 +33,9 @@ function arg(name: string): string {
 }
 
 function openSnapshot(dbPath: string): Database {
-  const dir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "benchdb-"))
-  for (const suffix of ["", "-wal", "-shm"]) {
-    try {
-      cpSync(dbPath + suffix, join(dir, "opencode.db" + suffix))
-    } catch {
-      /* -wal/-shm may not exist yet */
-    }
-  }
-  // Open read-write: replaying the copied -wal into the copied .db requires writes.
-  // Opening readonly can surface SQLITE_CORRUPT when the WAL has pending frames.
-  return new Database(join(dir, "opencode.db"))
+  const db = new Database(dbPath)
+  db.run("pragma busy_timeout = 5000")
+  return db
 }
 
 type Row = Record<string, unknown>
