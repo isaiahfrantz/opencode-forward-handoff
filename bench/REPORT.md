@@ -114,9 +114,16 @@ crossed in 2 of 15 runs.
 | legacy-audit | with | 5 | 100% | 275.9 | 454,418 | 0.0 | 0.0 | 0.0 |
 | legacy-audit | without | 5 | 100% | 178.9 | 348,161 | 0.0 | 0.0 | 0.0 |
 | legacy-audit | updated | 5 | 100% | 177.3 | 355,745 | 0.0 | 0.0 | 0.0 |
+| legacy-audit | subfix† | 5 | 100% | 148.8 | 304,555 | 0.0 | 0.0 | 0.0 |
 |  | **Δ (with vs without)** | | +0% | +54% | +31% | | | — |
 |  | **Δ (updated vs without)** | | +0% | −1% | +2% | | | — |
 |  | **Δ (updated vs with)** | | +0% | −36% | −22% | | | — |
+|  | **Δ (subfix vs without)** | | +0% | −17% | −13% | | | — |
+|  | **Δ (subfix vs updated)** | | +0% | −16% | −14% | | | — |
+|  | **Δ (subfix vs with)** | | +0% | −46% | −33% | | | — |
+
+† `subfix` is the sub-agent retest arm (plugin @ `9e2ab69`, `--sublimit 24000`
+instead of 16000) — see the retest subsection below.
 
 ![Legacy-audit billed tokens](charts/sub-agent-legacy-audit-tokens.svg)
 ![Legacy-audit wall time](charts/sub-agent-legacy-audit-wall.svg)
@@ -126,6 +133,7 @@ crossed in 2 of 15 runs.
 | legacy-audit | with | 4.0 | 132,122 | 322,297 | 14,042 | 17,165 |
 | legacy-audit | without | 4.0 | 96,493 | 251,668 | 12,184 | 13,989 |
 | legacy-audit | updated | 4.0 | 94,925 | 260,820 | 12,540 | 13,909 |
+| legacy-audit | subfix† | 4.0 | 103,070 | 201,484 | 13,548 | 14,181 |
 
 All 15 runs pass (60/60 `bun test` verified by `check.sh`), zero parent
 handoffs — parents stay ≤16.7k. The action is in the sub-agents: the
@@ -139,6 +147,56 @@ never fired (max sub peak 14,979 < 16k): that gap is sampling luck, not
 the new grace/deferral logic, which only applies to primary sessions.
 Family variance is huge (267k–641k tokens on identical prompts); with
 n=5 these arm means are not statistically separated.
+
+### Sub-agent fixes retest (`subfix` arm)
+
+The gaps above pointed straight at the sub-agent path, so five fixes shipped
+in `9e2ab69` and legacy-audit was re-run (n=5, `--limit 24000 --sublimit
+24000`, results in `/tmp/opencode/bench/runs-la-sub`):
+
+1. **Higher subagent limit** — the 16k default is far below this backend's
+   real ≈32k capacity; the retest pins 24k.
+2. **Grace band for sub-agents** (`subagentGraceTokens: 2000`) — warn-only
+   band between soft and hard limit instead of a single cliff.
+3. **Safe-boundary deferral for sub-agents** — at/over the hard limit, a
+   read-only tool call with no in-flight mutation defers the forced summary
+   to a safe boundary (same rules as primary sessions).
+4. **Budget priming at the first prompt** — each sub-agent's first user
+   prompt now carries a short `[handoff] Context budget:` primer that pins
+   the relay contract up front, with no extra message.
+5. **Relay-contract mini-schema** — TASK / CHANGED / CHECKS / FAILED / NEXT,
+   ≤300 tokens, so sub-agent results (which stay permanently resident in the
+   parent's re-sent context) are cheap. Sub-agents deliberately do **not**
+   get real rollover: an orphaned child session's result would be lost.
+
+| arm | success | wall (s) | billed | parent tok | sub tok | sub peak (max) | avg relay out tok |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| with | 100% | 275.9 | 454,418 | 132,122 | 322,297 | 17,165 | 384 |
+| without | 100% | 178.9 | 348,161 | 96,493 | 251,668 | 13,989 | 359 |
+| updated | 100% | 177.3 | 355,745 | 94,925 | 260,820 | 13,909 | 340 |
+| **subfix** | **100%** | **148.8** | **304,555** | 103,070 | **201,484** | 14,181 | **219** |
+
+`subfix` beats every arm: **−13% billed / −17% wall vs `without`**, −14% /
+−16% vs `updated`, −33% / −46% vs `with` — the first arm to beat the no-plugin
+baseline on this family. All 5 reps pass, zero hops, zero forced summaries:
+max sub-agent occupancy is 14,181, under the new 24k soft limit, so fixes
+2–3 never had to fire. All 28 gate checks in the serve log are `gate=pass`
+(22 sub-agent lines at band `soft=24000 hard=26000`, 6 parent lines at
+`soft=24000 hard=28000`).
+
+What is left is the token-side win from fix 5: priming was verified in the
+run DB — all 24 sub-agent sessions carry the `[handoff] Context budget:`
+primer on their first user prompt (24/24, `session_message` rows of type
+`user`), and the average final relay shrank to **219 output tokens / 720
+text bytes** (max 1,359 B) vs 340–384 tokens / 1,161–1,279 B in the baseline
+arms (max 2,815 B). Since every relay token is re-billed as `cache.read` on
+each subsequent parent turn, terse relays compound: the sub-agent share drops
+to 201k billed (−20% vs `without`). Parent-side cost is flat-to-slightly-up
+(103k vs 96k) — the primer itself plus normal variance — so the family win
+comes from the children, as intended. (Caveat: same n=5 variance as above;
+and the higher limit and the priming both contribute, though with no gate
+events in either arm, the gate-raising itself adds no savings here — the
+−13% vs `without` is priming/relay brevity.)
 
 ## Analysis
 
@@ -159,14 +217,16 @@ not recur in any updated rep.
 **Where the plugin doesn't help.** On sub-agent workloads whose shards
 complete under the cap (module-triage fully, legacy-audit all but 2/15
 sub-agents), every gate event is cost without benefit: forced summaries +
-parent rework, +31%/+24% tokens in the `with` arms. The subagent gate has
-no grace band yet — the legacy-audit data suggests the 16k subagent limit
-is too aggressive for this backend (real cap ≈32k) and a sub-agent grace
-band (or a higher limit) is the natural follow-up.
+parent rework, +31%/+24% tokens in the `with` arms. That diagnosis drove
+the sub-agent fixes retest above (`9e2ab69`: 24k subagent limit, grace
+band, safe-boundary deferral, relay-contract priming), which turned
+legacy-audit into the plugin's best family result — −13% billed vs the
+no-plugin baseline, with the gate never firing.
 
 **Caveats.** n=5 per cell; rep-to-rep variance within a cell reaches
 ±40% (see legacy-audit), so small deltas (<±10%) between arms — e.g.
 warehouse-cli, updated-vs-without module-triage — should be read as noise.
-Success was 100% in all 60 runs, so the benchmark measures efficiency, not
+Success was 100% in all 60 runs (80 including the `subfix` retest), so the
+benchmark measures efficiency, not
 capability: the discriminating signal is token/wall cost on tasks that
 actually approach the context cap.
