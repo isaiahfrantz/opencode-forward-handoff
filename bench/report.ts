@@ -19,6 +19,12 @@ type Row = {
   compaction_rejects: number
   wall_ms: number
   tokens_billed: number
+  // subagent split (metrics.ts agg via parent_id); absent in older runs
+  subagents?: number
+  parent_tokens_billed?: number
+  subagent_tokens_billed?: number
+  parent_peak_occupancy?: number
+  subagent_peak_occupancy?: number
 }
 
 const args = process.argv.slice(2)
@@ -81,4 +87,24 @@ for (const arm of ["with", "without"]) {
     fmt(mean(rs.map((r) => r.nudges)), 1).padStart(7),
     fmt(mean(rs.map((r) => r.compaction_rejects)), 1).padStart(7),
   )
+}
+
+if (rows.some((r) => (r.subagents ?? 0) > 0)) {
+  console.log("\nsubagent split (task-tool children, via session parent_id)")
+  console.log("task        arm       subs  parent tok  sub tok  parent peak  sub peak")
+  for (const task of byTask) {
+    for (const arm of ["with", "without"]) {
+      const rs = rows.filter((r) => r.task === task && r.arm === arm)
+      if (rs.length === 0 || !rs.some((r) => (r.subagents ?? 0) > 0)) continue
+      console.log(
+        task.padEnd(11),
+        arm.padEnd(9),
+        fmt(mean(rs.map((r) => r.subagents ?? 0)), 1).padStart(4),
+        fmt(mean(rs.map((r) => r.parent_tokens_billed ?? r.tokens_billed))).padStart(11),
+        fmt(mean(rs.map((r) => r.subagent_tokens_billed ?? 0))).padStart(8),
+        fmt(mean(rs.map((r) => r.parent_peak_occupancy ?? 0))).padStart(12),
+        fmt(mean(rs.map((r) => r.subagent_peak_occupancy ?? 0))).padStart(9),
+      )
+    }
+  }
 }

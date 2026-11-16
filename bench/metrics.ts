@@ -8,8 +8,10 @@
  *         prints the newest unseen "Resumed Handoff (…)" session id in dir, or ""
  *   agg   --db <path> --dir <scratch-dir> --since <ms>
  *         prints JSON aggregates over all sessions created in dir after since:
- *         summed tokens, peak_occupancy (last-message metric, as the plugin gate
- *         sees it), handoffs (Resumed Handoff children), per-session breakdown
+ *         summed tokens, peak_occupancy (max last-message metric across
+ *         sessions, as the plugin gate sees it), handoffs (Resumed Handoff
+ *         children), the parent-chain vs subagent split (task-tool subagents
+ *         have parent_id set; handoff children do not), per-session breakdown
  *   active --db <path> --dir <scratch-dir> --since <ms> [--cap 300000]
  *         prints JSON {span_ms, active_ms, dead_ms, largest_gap_ms} derived from
  *         the merged message timeline of all sessions in dir. Inter-message gaps
@@ -67,7 +69,7 @@ if (cmd === "idle") {
   const db = openSnapshot(arg("db"))
   const rows = db
     .query(
-      `select id, title, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, cost
+      `select id, title, parent_id, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, cost
        from session_v2
        where directory = ?1 and time_created >= ?2
        order by time_created`
@@ -75,12 +77,18 @@ if (cmd === "idle") {
     .all(arg("dir"), Number(arg("since"))) as Array<{
     id: string
     title: string
+    parent_id: string | null
     tokens_input: number | null
     tokens_output: number | null
     tokens_cache_read: number | null
     tokens_cache_write: number | null
     cost: number | null
   }>
+  // Subagent (task-tool) sessions carry parent_id; handoff "Resumed Handoff"
+  // children have parent_id NULL, so the two partition cleanly.
+  const isSub = (r: (typeof rows)[number]) => r.parent_id != null
+  const billed = (r: (typeof rows)[number]) =>
+    (r.tokens_input ?? 0) + (r.tokens_cache_read ?? 0) + (r.tokens_output ?? 0)
   const sum = (f: (r: (typeof rows)[number]) => number | null) =>
     rows.reduce((a, r) => a + (f(r) ?? 0), 0)
   // session_v2 token columns are RUNNING TOTALS across steps, not prompt-side
@@ -111,22 +119,30 @@ if (cmd === "idle") {
     peakBySession.set(id, peak)
   }
   const peakOccupancy = Math.max(0, ...peakBySession.values())
+  const parentPeak = Math.max(0, ...rows.filter((r) => !isSub(r)).map((r) => peakBySession.get(r.id) ?? 0))
+  const subPeak = Math.max(0, ...rows.filter(isSub).map((r) => peakBySession.get(r.id) ?? 0))
   console.log(
     JSON.stringify({
       sessions: rows.length,
+      subagents: rows.filter(isSub).length,
       tokens_input: sum((r) => r.tokens_input),
       tokens_output: sum((r) => r.tokens_output),
       tokens_cache_read: sum((r) => r.tokens_cache_read),
       tokens_cache_write: sum((r) => r.tokens_cache_write),
-      tokens_billed: sum((r) => (r.tokens_input ?? 0) + (r.tokens_cache_read ?? 0) + (r.tokens_output ?? 0)),
+      tokens_billed: sum(billed),
+      parent_tokens_billed: sum((r) => (isSub(r) ? 0 : billed(r))),
+      subagent_tokens_billed: sum((r) => (isSub(r) ? billed(r) : 0)),
       cost: sum((r) => r.cost),
       peak_occupancy: peakOccupancy,
+      parent_peak_occupancy: parentPeak,
+      subagent_peak_occupancy: subPeak,
       handoffs: rows.filter((r) => r.title.startsWith("Resumed Handoff")).length,
       by_session: rows.map((r) => ({
         id: r.id,
         title: r.title,
+        is_subagent: isSub(r),
         peak_occupancy: peakBySession.get(r.id) ?? 0,
-        tokens_billed: (r.tokens_input ?? 0) + (r.tokens_cache_read ?? 0) + (r.tokens_output ?? 0),
+        tokens_billed: billed(r),
       })) as Row[],
     })
   )
