@@ -123,7 +123,11 @@ function groupedBarSvg(
 ) {
   const W = 640, H = 360, padL = 78, padB = 58, padT = 44
   const vals = series.flatMap((s) => s.values.filter((v): v is number => v != null))
-  const max = Math.max(1, ...vals) * 1.15
+  // round the axis max up so the 4 gridline ticks are human numbers
+  const rawMax = Math.max(1, ...vals) * 1.1
+  const pow = 10 ** Math.floor(Math.log10(rawMax))
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * pow).find((s) => s * 4 >= rawMax) ?? 10 * pow
+  const max = step * 4
   const plotW = W - padL - 20, plotH = H - padT - padB
   const groupW = plotW / tasks.length
   const barW = Math.min(64, (groupW * 0.7) / series.length)
