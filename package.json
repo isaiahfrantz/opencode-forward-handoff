@@ -1,7 +1,26 @@
 {
   "name": "opencode-forward-handoff",
   "version": "0.1.0",
+  "description": "Forward handoff for OpenCode sessions: when a session's context occupancy crosses a configurable limit, it blocks further tool calls, forces a structured handoff artifact, and seeds a fresh session with it.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/isaiahfrantz/opencode-forward-handoff.git"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "handoff",
+    "context",
+    "session",
+    "rollover"
+  ],
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
   "exports": {
     ".": "./src/index.ts",
     "./tui": "./src/tui.tsx"
