@@ -97,12 +97,14 @@ bun bench/charts.ts runs1.jsonl runs2.jsonl ... \
   --svg-dir bench/charts --out REPORT-sections.md
 ```
 
-Flags: `--arm with|without|updated|both` (a token is `both` iff exactly the
-two original arms are listed, for DB/port/label reuse), `--tasks "t1 t2"`,
-`--reps N`, `--nudges N`, `--limit N` (plugin arms' `primaryLimit`),
-`--sublimit N` (plugin arms' `subagentLimit`, default 16000),
+Flags: `--arm with|without|updated|subfix|anchored|both` (a token is `both` iff
+exactly the two original arms are listed, for DB/port/label reuse),
+`--tasks "t1 t2"`, `--reps N`, `--nudges N`, `--limit N` (plugin arms'
+`primaryLimit`), `--sublimit N` (plugin arms' `subagentLimit`, default 16000),
 `--runs-dir DIR`. The CLI binary is resolved as `$OPENCODE_BIN` →
-`bench/bin/opencode` (untracked) → `opencode`. Never run two runners against
+`bench/bin/opencode` (untracked) → `opencode`. The model backend URL comes from
+`$BENCH_BASE_URL` (the arm configs reference it as `{env:BENCH_BASE_URL}`; the
+runner defaults it to the local gufo endpoint). Never run two runners against
 the same `--runs-dir` concurrently (they interleave rows and share per-rep
 dirs).
 

@@ -44,6 +44,11 @@ MODEL="gufo/qwen3.8-flash-next-v3.1"
 TURN_TIMEOUT=1500     # seconds cap per agent turn
 IDLE_TIMEOUT=1500     # seconds to wait for a session to go idle
 CHILD_GRACE=24        # seconds to wait for the plugin's idle-hook rollover after idle
+# OpenAI-compatible backend for the benchmark model. The arm configs reference it
+# as {env:BENCH_BASE_URL}; override with BENCH_BASE_URL=... bench/run.sh ...
+BASE_URL="${BENCH_BASE_URL:-http://192.168.1.193:8080/v1}"
+export BENCH_BASE_URL="$BASE_URL"
+
 PORT_WITH=17801
 PORT_WITHOUT=17802
 PORT_UPDATED=17803
