@@ -247,6 +247,29 @@ async kickoff stub; the relay lands as a harness-written synthetic message
 with no rewrite hook), so prompt anchoring is the lever — and at 20/20
 starts and 0/20 offenders it is sufficient here.
 
+### Post-upgrade sanity check (anchored re-run)
+
+After upgrading the backend (gufo), the anchored retest was re-run verbatim
+(same pin `4bb5198`, `--limit 24000 --sublimit 24000`, legacy-audit, n=5) to
+check the upgrade didn't regress behaviour:
+
+| metric | pre-upgrade | post-upgrade | Δ |
+|---|---:|---:|---:|
+| billed tokens | 288,066 | **274,295** | −5% |
+| wall (s) | 141.3 | **132.2** | −6% |
+| parent tok | 90,456 | 88,042 | −3% |
+| sub-agent tok | 197,611 | **186,253** | −6% |
+| avg relay out tok | 155 | 165 | +6% |
+
+5/5 pass, zero hops/nudges/rejects, and relay compliance held at 20/20
+`TASK:` starts with zero bold-prose offenders — identical hygiene. The
+token deltas sit inside the usual rep-to-rep variance (per-rep ranges
+overlap), though the wall median did shift down (141s → 128s). One backend
+change worth recording: `/v1/models` now honestly declares
+`context_length: 32768` instead of the old 131072-declared/≈32k-enforced
+mismatch; the arm configs pin the client-side limit at 131072 themselves,
+so OpenCode's behavior is unaffected (zero compaction rejects confirms it).
+
 ## Analysis
 
 **Where the plugin wins.** Only the single-agent `pricing-engine` runs
@@ -277,7 +300,9 @@ never firing.
 ±40% (see legacy-audit), so small deltas (<±10%) between arms — e.g.
 warehouse-cli, updated-vs-without module-triage — should be read as noise.
 Success was 100% in all 70 scored runs (60 in the main sweep + the 2 legacy-
-audit retests), so the benchmark measures efficiency, not
+audit retests; the post-upgrade sanity re-run adds 5 more passing runs but
+has no baseline pair and is excluded from the count), so the benchmark
+measures efficiency, not
 capability: the discriminating signal is token/wall cost on tasks that
 actually approach the context cap. One systemic lesson: the original
 legacy-audit sweep enforced a 16k subagent limit against a ≈32k backend, so
