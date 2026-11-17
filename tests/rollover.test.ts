@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import handoffPlugin from "../src/index.js"
@@ -48,7 +49,7 @@ let sandbox: string
 let realHome: string | undefined
 
 beforeEach(() => {
-  sandbox = mkdtempSync(join("/tmp/opencode", "handoff-e2e-"))
+  sandbox = mkdtempSync(join(tmpdir(), "handoff-e2e-"))
   realHome = process.env.HOME
   process.env.HOME = join(sandbox, "home") // isolate from user config
   delete process.env.OPENCODE_PRIMARY_LIMIT
