@@ -5,7 +5,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "gufo (local)",
       "options": {
-        "baseURL": "http://192.168.1.193:8080/v1"
+        "baseURL": "{env:BENCH_BASE_URL}"
       },
       "models": {
         "qwen3.8-flash-next-v3.1": {

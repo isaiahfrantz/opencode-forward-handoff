@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { loadConfig, PLUGIN_DEFAULTS, runtimeOverrides } from "../src/config.js"
@@ -13,7 +14,7 @@ const realGrace = process.env.OPENCODE_GRACE_TOKENS
 let sandbox: string
 
 beforeEach(() => {
-  sandbox = mkdtempSync(join("/tmp/opencode", "handoff-test-"))
+  sandbox = mkdtempSync(join(tmpdir(), "handoff-test-"))
   process.env.HOME = join(sandbox, "home") // does not exist -> no user config
   delete process.env.OPENCODE_PRIMARY_LIMIT
   delete process.env.OPENCODE_SUBAGENT_LIMIT

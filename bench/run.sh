@@ -44,18 +44,24 @@ MODEL="gufo/qwen3.8-flash-next-v3.1"
 TURN_TIMEOUT=1500     # seconds cap per agent turn
 IDLE_TIMEOUT=1500     # seconds to wait for a session to go idle
 CHILD_GRACE=24        # seconds to wait for the plugin's idle-hook rollover after idle
+# OpenAI-compatible backend for the benchmark model. The arm configs reference it
+# as {env:BENCH_BASE_URL}; override with BENCH_BASE_URL=... bench/run.sh ...
+BASE_URL="${BENCH_BASE_URL:-http://192.168.1.193:8080/v1}"
+export BENCH_BASE_URL="$BASE_URL"
+
 PORT_WITH=17801
 PORT_WITHOUT=17802
 PORT_UPDATED=17803
 PORT_SUBFIX=17804
+PORT_ANCHORED=17805
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --arm)
       case "$2" in
         both) ARMS="with without" ;;
-        with|without|updated|subfix) ARMS="$2" ;;
-        *) echo "unknown arm: $2 (use with|without|updated|subfix|both)" >&2; exit 2 ;;
+        with|without|updated|subfix|anchored) ARMS="$2" ;;
+        *) echo "unknown arm: $2 (use with|without|updated|subfix|anchored|both)" >&2; exit 2 ;;
       esac
       shift 2 ;;
     --tasks) TASKS="$2"; shift 2 ;;
@@ -84,6 +90,7 @@ start_server() { # arm -> sets SERVER_PID[arm], SERVER_PORT[arm], etc.
     with) port=$PORT_WITH ;;
     updated) port=$PORT_UPDATED ;;
     subfix) port=$PORT_SUBFIX ;;
+    anchored) port=$PORT_ANCHORED ;;
     *) port=$PORT_WITHOUT ;;
   esac
   local data="$RUNS_DIR/$arm/data"

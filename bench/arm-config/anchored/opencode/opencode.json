@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    "git+https://github.com/isaiahfrantz/opencode-forward-handoff.git#4bb5198ad53289ab7d78ecd8137694c24dfd9fa9"
+  ],
+  "provider": {
+    "gufo": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "gufo (local)",
+      "options": {
+        "baseURL": "{env:BENCH_BASE_URL}"
+      },
+      "models": {
+        "qwen3.8-flash-next-v3.1": {
+          "name": "qwen3.8-flash-next-v3.1",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": { "context": 131072, "output": 16384 }
+        }
+      }
+    }
+  },
+  "model": "gufo/qwen3.8-flash-next-v3.1"
+}

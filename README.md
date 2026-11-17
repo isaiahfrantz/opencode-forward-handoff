@@ -7,7 +7,8 @@ handoff artifact, and automatically rolls over to a fresh session seeded with a 
 ## How it works
 
 1. **Occupancy tracking** — before every tool call, the plugin measures the session's true context
-   occupancy (prompt-side tokens of the latest assistant message: `input + cache.read`).
+   occupancy (prompt-side tokens: the maximum of `input + cache.read` across completed assistant
+   messages).
 2. **Limit reached** — further tool calls are blocked and the agent is instructed to stop and
    output a `# SESSION HANDOFF ARTIFACT`: objective, verified progress, failed approaches,
    file/symbol map, and the immediate next step.
@@ -68,17 +69,23 @@ Settings are read from `.opencode/handoff.json` in the project, or
 
 | Option            | Default             | Description                                        |
 | ----------------- | ------------------- | -------------------------------------------------- |
-| `primaryLimit`    | `24000`             | Soft token budget for primary sessions             |
+| `primaryLimit`    | `28000`             | Soft token budget for primary sessions             |
 | `subagentLimit`   | `16000`             | Token budget for subagent sessions                 |
 | `autoRollover`    | `true`              | Spawn + seed the resumed session automatically     |
 | `saveArtifactsDir`| `.opencode/handoffs`| Directory for saved handoff artifacts (per repo)   |
-| `graceTokens`     | `4000`              | Extra headroom between the soft limit and the hard gate; inside the band a warning nudges the model to wrap up without blocking tools. `0` restores fail-fast behavior |
+| `graceTokens`     | `2000`              | Extra headroom between the soft limit and the hard gate; inside the band a warning nudges the model to wrap up without blocking tools. `0` restores fail-fast behavior |
 | `deferAtSafeBoundary` | `true`          | At the hard gate, defer the handoff while the session sits at a safe boundary (no in-flight mutation, todo list empty or all-completed); forced at the next state-changing call |
 | `maxDeferrals`    | `6`                 | How many safe-boundary deferrals are allowed before the handoff is forced anyway |
 
 Precedence (lowest to highest): built-in defaults → plugin options → environment variables
 (`OPENCODE_PRIMARY_LIMIT`, `OPENCODE_SUBAGENT_LIMIT`, `OPENCODE_GRACE_TOKENS`) → config file →
 runtime overrides set via `/handoff-limit`.
+
+> **Provider capacity note.** The effective hard gate is `primaryLimit + graceTokens`. Keep that
+> sum below the context capacity the provider *actually enforces* — several OpenAI-compatible
+> backends advertise 131072-token models but hard-reject prompts around 32k, which is why the
+> shipped defaults (28000 + 2000) land at 30k. On providers with genuine 128k+ capacity, raising
+> `primaryLimit` (e.g. to 115000) is safe.
 
 ## Commands
 
