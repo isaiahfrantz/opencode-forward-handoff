@@ -13,7 +13,7 @@ sub-agent tasks, grace window 4000), 5 reps per task/arm, deterministic
 | `without` | none | — |
 | `with` | original (`7b12cd0`) | single threshold at 24000: tool call blocked, handoff forced immediately (fail-fast) |
 | `updated` | grace window + deferral (`1057e49`) | warn-only band 24000–28000; at the hard gate, read-only calls at a safe boundary (no in-flight edit, empty/completed todos) are deferred up to 6× before forcing |
-| `subfix` † | sub-agent fixes (`9e2ab69`) | retest arm: budget priming + relay schema on sub-agents, 24k sublimit |
+| `subfix` † | sub-agent fixes (`9e2ab69`) | retest arm: budget priming + relay schema on sub-agents, scoped 24k sublimit |
 | `anchored` † | + relay anchor (`4bb5198`) | retest arm: relay replies must begin with the `TASK:` line |
 
 † retest arms, run on the legacy-audit family only — see
@@ -112,7 +112,10 @@ grace/deferral design shrinks (but does not eliminate) that exposure.
 Four parallel sub-agents repair planted regressions in sprawling legacy
 modules governed by locked spec docs (with a deliberately misleading
 `docs/NOTES.md`). Shards run 13–24k tokens; the 16k subagent limit was
-crossed in 2 of 15 runs.
+crossed in 2 of 15 runs. (Scope correction: that 16k gate sat *below* the
+backend's real ≈32k capacity, so every crossing was a forced summary that
+didn't need to happen — the `subfix`/`anchored` retests below re-ran this
+family at the corrected 24k.)
 
 | task | arm | reps | success | wall (s) | billed tokens | hops | nudges | rejects |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
@@ -273,7 +276,10 @@ never firing.
 **Caveats.** n=5 per cell; rep-to-rep variance within a cell reaches
 ±40% (see legacy-audit), so small deltas (<±10%) between arms — e.g.
 warehouse-cli, updated-vs-without module-triage — should be read as noise.
-Success was 100% in all 60 runs (80 including the `subfix` retest), so the
-benchmark measures efficiency, not
+Success was 100% in all 70 scored runs (60 in the main sweep + the 2 legacy-
+audit retests), so the benchmark measures efficiency, not
 capability: the discriminating signal is token/wall cost on tasks that
-actually approach the context cap.
+actually approach the context cap. One systemic lesson: the original
+legacy-audit sweep enforced a 16k subagent limit against a ≈32k backend, so
+its "gate fires = cost" numbers were measuring self-inflicted handoffs; the
+retests re-established the same conclusion at the correct scope.

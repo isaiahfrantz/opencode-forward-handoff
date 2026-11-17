@@ -10,6 +10,8 @@ the original gate against the updated (grace window + deferral) version.
 |-----|--------|-------|
 | `with` | original, loaded from GitHub pinned to `7b12cd0` (`arm-config/with/opencode/opencode.json`) | fail-fast single threshold: at `primaryLimit` the tool call is blocked and a handoff forced immediately |
 | `updated` | grace window + safe-boundary deferral, pinned to `1057e49` (`arm-config/updated/opencode/opencode.json`) | warn-only band `primaryLimit`…`primaryLimit+graceTokens`; at the hard gate, read-only calls at a safe boundary defer up to 6× before forcing |
+| `subfix` | sub-agent fixes, pinned to `9e2ab69` (`arm-config/subfix/…`) | retest arm (legacy-audit only): sub-agent budget priming + relay schema + sub-agent grace/deferral |
+| `anchored` | + relay anchor, pinned to `4bb5198` (`arm-config/anchored/…`) | retest arm (legacy-audit only): relay replies must begin with the `TASK:` line |
 | `without` | not configured at all | sessions run to completion (or provider-side rejection) in one context |
 
 Both plugin arms get a hermetic `.opencode/handoff.json` (`primaryLimit` =
