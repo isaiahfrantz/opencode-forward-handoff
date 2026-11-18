@@ -63,19 +63,23 @@ Settings are read from `.opencode/handoff.json` in the project, or
   "saveArtifactsDir": ".opencode/handoffs",
   "graceTokens": 4000,
   "deferAtSafeBoundary": true,
-  "maxDeferrals": 6
+  "maxDeferrals": 6,
+  "subagentGraceTokens": 2000,
+  "subagentPriming": true
 }
 ```
 
 | Option            | Default             | Description                                        |
 | ----------------- | ------------------- | -------------------------------------------------- |
 | `primaryLimit`    | `28000`             | Soft token budget for primary sessions             |
-| `subagentLimit`   | `16000`             | Token budget for subagent sessions                 |
+| `subagentLimit`   | `16000`             | Soft token budget for subagent sessions            |
 | `autoRollover`    | `true`              | Spawn + seed the resumed session automatically     |
 | `saveArtifactsDir`| `.opencode/handoffs`| Directory for saved handoff artifacts (per repo)   |
 | `graceTokens`     | `2000`              | Extra headroom between the soft limit and the hard gate; inside the band a warning nudges the model to wrap up without blocking tools. `0` restores fail-fast behavior |
 | `deferAtSafeBoundary` | `true`          | At the hard gate, defer the handoff while the session sits at a safe boundary (no in-flight mutation, todo list empty or all-completed); forced at the next state-changing call |
 | `maxDeferrals`    | `6`                 | How many safe-boundary deferrals are allowed before the handoff is forced anyway |
+| `subagentGraceTokens` | `2000`          | Extra headroom between `subagentLimit` and the subagent hard gate (`0` restores single-threshold behavior) |
+| `subagentPriming` | `true`              | Append the compact ≤300-token relay-contract primer (`TASK:` schema) to each subagent's first prompt |
 
 Precedence (lowest to highest): built-in defaults → plugin options → environment variables
 (`OPENCODE_PRIMARY_LIMIT`, `OPENCODE_SUBAGENT_LIMIT`, `OPENCODE_GRACE_TOKENS`) → config file →

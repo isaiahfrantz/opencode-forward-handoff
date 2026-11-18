@@ -373,24 +373,26 @@ describe("forward-handoff rollover (end-to-end)", () => {
     expect(state.prompts).toHaveLength(1)
     expect(state.synthetics).toHaveLength(0)
 
-    // settled mutation but an unfinished todo list → not a boundary
+    // settled mutation but an unfinished todo list in an earlier turn → not a boundary
     const { state: s2, hooks: h2, cleanup: c2 } = await startPlugin()
     s2.messages = [
-      assistantWithParts(9_000, 500, [
+      assistantWithParts(4_000, 0, [
         toolPart("write", "completed"),
         toolPart("todowrite", "completed", ["completed", "in_progress"]),
       ]),
+      assistantWithParts(9_000, 500, [toolPart("read", "completed")]),
     ]
     await expect(h2["tool.execute.before"]!({ sessionID: "ses_primary", tool: "read" })).rejects.toThrow(
       /Context cap \(9500\/5000/
     )
 
-    // all todos completed → boundary again, deferral applies
+    // latest todowrite in the message wins and all todos completed → boundary again, deferral applies
     s2.messages = [
-      assistantWithParts(9_000, 500, [
-        toolPart("write", "completed"),
+      assistantWithParts(4_000, 0, [
+        toolPart("todowrite", "completed", ["completed", "in_progress"]),
         toolPart("todowrite", "completed", ["completed", "completed"]),
       ]),
+      assistantWithParts(9_000, 500, [toolPart("read", "completed")]),
     ]
     await expect(h2["tool.execute.before"]!({ sessionID: "ses_primary", tool: "read" })).resolves.toBeUndefined()
     expect(s2.prompts).toHaveLength(1) // no additional handoff prompt
@@ -439,7 +441,7 @@ describe("forward-handoff rollover (end-to-end)", () => {
 
     // Hard gate is 2000+2000=4000. Occupancy 4500 over a read-only step with no
     // in-flight mutation defers like a primary session.
-    state.messages = [assistantMessage(4_500, 0, undefined, [toolPart("read", "completed")])]
+    state.messages = [assistantWithParts(4_500, 0, [toolPart("read", "completed")])]
     await toolHook({ sessionID: "ses_sub", tool: "read" })
     expect(state.prompts).toHaveLength(0)
     expect(state.synthetics.some((p: { text: string }) => p.text.includes("handoff deferred"))).toBe(
@@ -506,6 +508,38 @@ describe("forward-handoff rollover (end-to-end)", () => {
     const { state, hooks, cleanup } = await startPlugin([], {}, { ses_sub: "ses_primary" })
     await hooks["prompt"]!({ sessionID: "ses_sub", prompt: { text: "Audit module alpha." } })
     expect(state.promptTexts["ses_sub"]).toBe("Audit module alpha.")
+
+    await cleanup?.()
+  })
+
+  it("lazily resolves subagent hierarchy in execute.before when session.created was missed", async () => {
+    const { state, hooks, cleanup } = await startPlugin([], {}, { ses_sub: "ses_primary" })
+    state.messages = [assistantMessage(4_500, 0)]
+    await expect(
+      hooks["tool.execute.before"]!({ sessionID: "ses_sub", tool: "shell" })
+    ).rejects.toThrow(/4500\/2000/)
+    expect(state.prompts[0].text).toContain("SUBAGENT CONTEXT LIMIT REACHED (4500/2000 tokens)")
+
+    await cleanup?.()
+  })
+
+  it("clears handoffPending on idle if the turn ended without emitting the handoff artifact", async () => {
+    const { state, hooks, cleanup } = await startPlugin()
+    const toolHook = hooks["tool.execute.before"]!
+    const idleHook = hooks["experimental.idle"]!
+
+    state.messages = [assistantMessage(9_500, 0)]
+    await expect(toolHook({ sessionID: "ses_primary", tool: "shell" })).rejects.toThrow()
+    expect(state.prompts).toHaveLength(1)
+
+    // Session goes idle without emitting the artifact -> handoffPending resets
+    state.messages = [assistantMessage(9_500, 0, "I need one more check first.")]
+    await idleHook({ sessionID: "ses_primary", background: [] })
+    expect(state.created).toHaveLength(0)
+
+    // Next tool call re-injects the generator prompt instead of staying wedged
+    await expect(toolHook({ sessionID: "ses_primary", tool: "shell" })).rejects.toThrow()
+    expect(state.prompts).toHaveLength(2)
 
     await cleanup?.()
   })

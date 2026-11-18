@@ -1,7 +1,7 @@
 import { Plugin } from "@opencode/plugin"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { type HandoffConfig, loadConfig, runtimeOverrides } from "./config.js"
+import { type HandoffConfig, loadConfig, PLUGIN_DEFAULTS, runtimeOverrides } from "./config.js"
 import {
   buildDeferralNote,
   buildGeneratorPrompt,
@@ -77,18 +77,19 @@ function hasInFlightMutation(messages: readonly unknown[]): boolean {
 }
 
 // Safe boundary from the agent's own todo list: the most recent todo mutation
-// (tool name containing "todo", e.g. todowrite) must show every item
-// completed. No todo list at all counts as a boundary ("empty").
+// (tool name containing "todo", e.g. todowrite) across the session must show
+// every item completed. No todo list at all counts as a boundary ("empty").
 function todosAtBoundary(messages: readonly unknown[]): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i] as MessageLike | undefined
     if (m?.type !== "assistant") continue
-    for (const part of m.content ?? []) {
-      if (part.type !== "tool" || !/todo/i.test(part.name ?? "")) continue
+    const parts = m.content ?? []
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const part = parts[j]
+      if (part?.type !== "tool" || !/todo/i.test(part.name ?? "")) continue
       const todos = part.state?.input?.todos
       if (todos && todos.length > 0) return todos.every((t) => t.status === "completed")
     }
-    break
   }
   return true
 }
@@ -108,6 +109,19 @@ export default Plugin.define({
     const getServerWorktree = () =>
       (ctx.location as { directory?: string }).directory ?? process.cwd()
 
+    async function fetchSessionMeta(sessionID: string): Promise<void> {
+      try {
+        const info = await ctx.session.get({ sessionID })
+        const dir = (info as { location?: { directory?: string } }).location?.directory
+        if (dir) sessionWorktree.set(sessionID, dir)
+        if (!isSubagent.has(sessionID)) {
+          isSubagent.set(sessionID, Boolean((info as { parentID?: string }).parentID))
+        }
+      } catch {
+        // fall through when session metadata cannot be queried
+      }
+    }
+
     // A server hosts sessions from many working directories: ctx.location is the
     // server's boot location, NOT the session's. Resolve the session's own
     // directory (cached from the session.created event, else ctx.session.get)
@@ -115,17 +129,15 @@ export default Plugin.define({
     async function resolveWorktree(sessionID: string): Promise<string> {
       const cached = sessionWorktree.get(sessionID)
       if (cached) return cached
-      try {
-        const info = await ctx.session.get({ sessionID })
-        const dir = (info as { location?: { directory?: string } }).location?.directory
-        if (dir) {
-          sessionWorktree.set(sessionID, dir)
-          return dir
-        }
-      } catch {
-        // fall through to the server boot location
-      }
-      return getServerWorktree()
+      await fetchSessionMeta(sessionID)
+      return sessionWorktree.get(sessionID) ?? getServerWorktree()
+    }
+
+    async function resolveIsSubagent(sessionID: string): Promise<boolean> {
+      const cached = isSubagent.get(sessionID)
+      if (cached !== undefined) return cached
+      await fetchSessionMeta(sessionID)
+      return isSubagent.get(sessionID) ?? false
     }
 
     const pluginOptions = ctx.options as unknown as Partial<HandoffConfig> | undefined
@@ -134,8 +146,7 @@ export default Plugin.define({
     await ctx.command.transform((editor) => {
       editor.add({
         name: "handoff-limit",
-        description:
-          "View, update, or get help on primary/subagent token limits (defaults: 24000 / 16000)",
+        description: `View, update, or get help on primary/subagent token limits (defaults: ${PLUGIN_DEFAULTS.primaryLimit} / ${PLUGIN_DEFAULTS.subagentLimit})`,
         async execute(input) {
           const worktree = await resolveWorktree(input.sessionID)
           const rawText = (input.prompt?.text ?? "").trim()
@@ -155,7 +166,7 @@ export default Plugin.define({
                 "  /handoff-limit                  -> Show active limits & current session tokens",
                 "  /handoff-limit <primary>        -> Set primary cap (e.g., /handoff-limit 28000)",
                 "  /handoff-limit <pri> <sub>      -> Set primary & subagent caps (e.g., 28000 14000)",
-                "  /handoff-limit reset            -> Revert to defaults (24000 / 16000) or config file",
+                `  /handoff-limit reset            -> Revert to defaults (${PLUGIN_DEFAULTS.primaryLimit} / ${PLUGIN_DEFAULTS.subagentLimit}) or config file`,
                 "  /handoff-limit help             -> Show this usage summary",
               ].join("\n"),
             })
@@ -194,12 +205,17 @@ export default Plugin.define({
           const currentUsage = occupancyFromMessages(
             await ctx.session.context({ sessionID: input.sessionID })
           )
-          const activeLimit = isSubagent.get(input.sessionID)
-            ? updated.subagentLimit
-            : updated.primaryLimit
+          const subagent = await resolveIsSubagent(input.sessionID)
+          const activeSoftLimit = subagent ? updated.subagentLimit : updated.primaryLimit
+          const activeHardLimit =
+            activeSoftLimit + (subagent ? updated.subagentGraceTokens : updated.graceTokens)
 
-          if (currentUsage < activeLimit) {
+          if (currentUsage < activeHardLimit) {
             handoffPending.delete(input.sessionID)
+            deferralCount.delete(input.sessionID)
+          }
+          if (currentUsage < activeSoftLimit) {
+            graceWarned.delete(input.sessionID)
           }
 
           await ctx.session.synthetic({
@@ -247,17 +263,7 @@ export default Plugin.define({
     //    never fires. Riding the first prompt itself adds no extra message.
     await ctx.session.hook("prompt", async (input) => {
       if (subagentPrimed.has(input.sessionID)) return
-      let subagent = isSubagent.get(input.sessionID)
-      if (subagent === undefined) {
-        // session.created may not have been consumed yet; resolve directly.
-        try {
-          const info = await ctx.session.get({ sessionID: input.sessionID })
-          subagent = Boolean((info as { parentID?: string }).parentID)
-        } catch {
-          return
-        }
-        isSubagent.set(input.sessionID, subagent)
-      }
+      const subagent = await resolveIsSubagent(input.sessionID)
       if (!subagent) return
       subagentPrimed.add(input.sessionID)
 
@@ -271,7 +277,7 @@ export default Plugin.define({
       const sessionID = input.sessionID
       if (!handoffPending.has(sessionID) || rolloverCompleted.has(sessionID)) return
 
-      if (isSubagent.get(sessionID)) {
+      if (await resolveIsSubagent(sessionID)) {
         rolloverCompleted.add(sessionID)
         return
       }
@@ -315,10 +321,15 @@ export default Plugin.define({
             })
           }
         }
+      } else if (!input.background?.some((b) => b.sessionID === sessionID)) {
+        // The session went idle without emitting the handoff artifact (and has no
+        // background jobs of its own still running): clear handoffPending so the
+        // next tool call re-injects the generator prompt instead of staying wedged.
+        handoffPending.delete(sessionID)
       }
     })
 
-    // 4. Gate tool execution on the session's context budget. Both session
+    // 5. Gate tool execution on the session's context budget. Both session
     //    kinds use three bands (subagents with subagentGraceTokens = 0 keep
     //    the original single-threshold behaviour):
     //      < softLimit              -> allow
@@ -334,7 +345,7 @@ export default Plugin.define({
       const cfg = loadConfig(worktree, pluginOptions)
       const ctxMsgs = await ctx.session.context({ sessionID: input.sessionID })
       const currentTokens = occupancyFromMessages(ctxMsgs)
-      const subagent = isSubagent.get(input.sessionID) ?? false
+      const subagent = await resolveIsSubagent(input.sessionID)
       const grace = subagent ? cfg.subagentGraceTokens : cfg.graceTokens
       const softLimit = subagent ? cfg.subagentLimit : cfg.primaryLimit
       const hardLimit = softLimit + grace

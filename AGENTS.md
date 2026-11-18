@@ -11,8 +11,8 @@ disk, and seeds a new session with it so work continues in a clean context windo
 ## Target platform
 
 - **OpenCode V2 only.** Uses the V2 plugin API (`Plugin.define`, `ctx.tool.hook`,
-  `ctx.session.hook("messages.transform")`, `ctx.command.transform`,
-  `ctx.event.subscribe`).
+  `ctx.session.hook("experimental.idle")`, `ctx.session.hook("prompt")`,
+  `ctx.command.transform`, `ctx.event.subscribe`).
   Do not introduce V1 (`@opencode-ai/plugin` hooks-style) patterns.
 - Server part is `src/index.ts`; companion TUI part is `src/tui.tsx` (package export
   `./tui`). One `plugins: [...]` entry in `opencode.json(c)` loads both parts — never
@@ -75,35 +75,33 @@ the next tool call (except `runtimeOverrides`, which only `/handoff-limit reset`
    `(subagentLimit, subagentLimit + subagentGraceTokens)` for subagents
    (`subagentGraceTokens: 0` restores the original single-threshold behavior). Forcing a
    subagent injects `buildSubagentSummaryPrompt` instead of the generator prompt.
-3. **Rollover** — `ctx.session.hook("messages.transform")` runs **after** `agent.states`
-   is built for the same request, so `isRunning` is set synchronously at the very end of
-   the core loop and post-turn detection is racy: **always** verify via `session.idle()`
-   (and re-check the idle-cache before waiting). It looks for
-   `# SESSION HANDOFF ARTIFACT` in the last assistant message's `text` content parts
-   (V2 message schema: `m.type === "assistant"`, `m.content[]`), saves the artifact to
-   `<worktree>/<saveArtifactsDir>/handoff-<ISO stamp>.md`, then (if `autoRollover`)
-   creates `Resumed Handoff (<time>)` and seeds it with `buildResumePrompt(artifact)`.
-   Subagent sessions that go pending just complete quietly — the parent handles rollover.
+3. **Rollover** — `ctx.session.hook("experimental.idle")` fires when the pending session
+   goes idle. It looks for `# SESSION HANDOFF ARTIFACT` in the last assistant message's
+   `text` content parts (V2 message schema: `m.type === "assistant"`, `m.content[]`),
+   saves the artifact to `<worktree>/<saveArtifactsDir>/handoff-<ISO stamp>.md`, then
+   (if `autoRollover`) creates `Resumed Handoff (<time>)` and seeds it with
+   `buildResumePrompt(artifact)`. Subagent sessions that go pending just complete
+   quietly — the parent handles rollover.
 4. **Idempotency** — `handoffPending` + `rolloverCompleted` sets ensure the generator
    prompt is injected once and the rollover happens once per session. Raising the limit
-   via `/handoff-limit` clears `handoffPending` if current usage drops below the new limit.
+   via `/handoff-limit` clears `handoffPending` if current usage drops below the new hard limit.
 
 ## Prompts (src/prompts.ts)
 
 - `buildGeneratorPrompt(current, limit)` — forces a ≤1,200-token markdown artifact with
   five fixed sections (Objective, Verified Progress, Negative Constraints, File/Symbol
   Map, Immediate Next Step). The literal marker `# SESSION HANDOFF ARTIFACT` is the
-  contract between the generator prompt and the transform-hook detector — keep both in sync.
+  contract between the generator prompt and the idle-hook detector — keep both in sync.
 - `buildResumePrompt(artifact)` — seeds new sessions; instructs scoped reads, trusting
   the artifact, and executing Section 5 immediately.
 - `buildGraceWarning` / `buildDeferralNote` — synthetic nudges for the grace band and the
   first safe-boundary deferral respectively; injected once per session/band, never block.
   Both take a `subagent` flag that switches wording ("relay summary" vs "handoff").
 - `buildSubagentPriming(hardLimit)` — relay-contract primer appended (once per session,
-  `subagentPrimed` set) to every sub-agent's **first prompt** via the prompt hook
-  (`@opencode/plugin/session-prompt`) by mutating `input.prompt.text` in place (adds no
-  extra message). Pins the ≤300-token TASK / CHANGED / CHECKS / FAILED / NEXT relay
-  schema up front; disabled by `subagentPriming: false`.
+  `subagentPrimed` set) to every sub-agent's **first prompt** via `ctx.session.hook("prompt")`
+  by mutating `input.prompt.text` in place (adds no extra message). Pins the ≤300-token
+  TASK / CHANGED / CHECKS / FAILED / NEXT relay schema up front; disabled by
+  `subagentPriming: false`.
 - `buildSubagentSummaryPrompt(current, limit)` — injected when a subagent's hard gate fires;
   self-contained (schema inline) so it works even when priming is off.
 
@@ -126,7 +124,7 @@ src/index.ts    server plugin (gate + rollover)
 src/config.ts   defaults, file/env/option/runtime precedence
 src/prompts.ts  generator + resume prompts (marker contract lives here)
 src/tui.tsx     TUI part (tab focus + toast)
-tests/          vitest; rollover tests drive the real idle-detector with mock ctx
+tests/          vitest; rollover tests drive real setup() with mock ctx
 ```
 
 - `bun x tsc --noEmit` must stay clean; `bun x vitest run` must pass before committing.
